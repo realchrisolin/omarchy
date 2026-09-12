@@ -14,30 +14,116 @@ BarWidget {
   // Use QsWindow (Quickshell), not Window.window — the latter is often null
   // in bar PanelWindows and broke eDP active-slot detection.
   readonly property var hostWindow: QsWindow.window
-  readonly property string monitorName: {
-    if (!hostWindow || !hostWindow.screen)
-      return ""
-    try {
-      var hm = Hyprland.monitorFor(hostWindow.screen)
-      if (hm && hm.name)
-        return String(hm.name)
-    } catch (e) {}
-    if (hostWindow.screen.name)
-      return String(hostWindow.screen.name)
-    return ""
-  }
+
+  // Bumped on Hyprland IPC events so focused/occupied bindings re-run even
+  // when nested monitor.activeWorkspace changes do not invalidate QML deps.
+  property int hyprEpoch: 0
+
+  readonly property string monitorName: root.resolveMonitorName()
   readonly property bool laptopMonitor: {
     var n = root.monitorName
-    // If we cannot resolve the screen yet, prefer laptop logic so the primary
-    // bar keeps showing the filled indicator (ext-N path would never match).
-    if (!n)
+    if (n)
+      return root.isLaptopName(n)
+    if (Hyprland.focusedMonitor && root.isLaptopName(Hyprland.focusedMonitor.name))
       return true
-    return n.indexOf("eDP") === 0 || n.indexOf("LVDS") === 0 || n.indexOf("DSI") === 0
+    var monitors = Hyprland.monitors.values
+    var external = 0
+    for (var i = 0; i < monitors.length; i++) {
+      if (monitors[i] && !root.isLaptopName(monitors[i].name))
+        external++
+    }
+    return external === 0
+  }
+
+  // Explicit slot properties so the Repeater binds to values that change with
+  // hyprEpoch / focusedWorkspace rather than opaque function call results.
+  readonly property int activeSlot: {
+    void root.hyprEpoch
+    void Hyprland.focusedWorkspace
+    void Hyprland.focusedMonitor
+    void Hyprland.workspaces.values
+    void Hyprland.monitors.values
+    return root.monitorActiveSlot()
   }
 
   function isLaptopName(name) {
     name = String(name || "")
     return name.indexOf("eDP") === 0 || name.indexOf("LVDS") === 0 || name.indexOf("DSI") === 0
+  }
+
+  function resolveMonitorName() {
+    void root.hyprEpoch
+    if (!hostWindow || !hostWindow.screen)
+      return ""
+    var screen = hostWindow.screen
+    var i
+    var m
+    var monitors = Hyprland.monitors.values
+
+    try {
+      var hm = Hyprland.monitorFor(screen)
+      if (hm && hm.name)
+        return String(hm.name)
+    } catch (e) {}
+
+    var screenName = screen.name ? String(screen.name) : ""
+    if (screenName) {
+      for (i = 0; i < monitors.length; i++) {
+        m = monitors[i]
+        if (m && String(m.name || "") === screenName)
+          return screenName
+      }
+    }
+
+    // Geometry match (Hyprland layout coords ↔ Qt screen position).
+    try {
+      var sx = Number(screen.x)
+      var sy = Number(screen.y)
+      var matches = []
+      for (i = 0; i < monitors.length; i++) {
+        m = monitors[i]
+        if (!m || !m.name) continue
+        if (Number(m.x) === sx && Number(m.y) === sy)
+          matches.push(m)
+      }
+      if (matches.length === 1)
+        return String(matches[0].name)
+      // Disambiguate duplicates by logical size when scale is known.
+      if (matches.length > 1) {
+        var sw = Number(screen.width)
+        var sh = Number(screen.height)
+        for (i = 0; i < matches.length; i++) {
+          m = matches[i]
+          var scale = Number(m.scale) || 1
+          if (Math.round(Number(m.width) / scale) === sw && Math.round(Number(m.height) / scale) === sh)
+            return String(m.name)
+        }
+        return String(matches[0].name)
+      }
+    } catch (e2) {}
+
+    // Primary Quickshell screen ↔ laptop connector; any other screen with a
+    // single external Hyprland output ↔ that output (Miracast Extend case).
+    try {
+      var screens = Quickshell.screens
+      var primary = screens && screens.length ? screens[0] : null
+      var externals = []
+      var laptop = null
+      for (i = 0; i < monitors.length; i++) {
+        m = monitors[i]
+        if (!m || !m.name) continue
+        if (root.isLaptopName(m.name))
+          laptop = m
+        else
+          externals.push(m)
+      }
+      if (primary && screen === primary && laptop)
+        return String(laptop.name)
+      if ((!primary || screen !== primary) && externals.length === 1)
+        return String(externals[0].name)
+    } catch (e3) {}
+
+    return screenName
   }
 
   function workspaceMonitorName(workspace) {
@@ -64,6 +150,7 @@ BarWidget {
   }
 
   function workspaceBySlot(slot) {
+    void root.hyprEpoch
     var values = Hyprland.workspaces.values
     var mon = root.monitorName
     for (var i = 0; i < values.length; i++) {
@@ -79,6 +166,7 @@ BarWidget {
   }
 
   function workspaceIds() {
+    void root.hyprEpoch
     var ids = [1, 2, 3, 4, 5]
     for (var slot = 6; slot <= 10; slot++) {
       if (root.workspaceBySlot(slot) !== null && ids.indexOf(slot) === -1)
@@ -91,7 +179,6 @@ BarWidget {
     if (!aw) return -1
     if (root.laptopMonitor) {
       var id = aw.id
-      // Classic path: positive numeric ids on the laptop.
       if (id >= 1 && id <= 10) return id
       return -1
     }
@@ -121,9 +208,14 @@ BarWidget {
         break
       }
     } else if (root.laptopMonitor) {
-      // Resolve eDP even when QsWindow.screen is not ready yet.
       for (i = 0; i < monitors.length; i++) {
         if (!monitors[i] || !root.isLaptopName(monitors[i].name)) continue
+        aw = monitors[i].activeWorkspace
+        break
+      }
+    } else {
+      for (i = 0; i < monitors.length; i++) {
+        if (!monitors[i] || root.isLaptopName(monitors[i].name)) continue
         aw = monitors[i].activeWorkspace
         break
       }
@@ -135,10 +227,8 @@ BarWidget {
       aw = Hyprland.focusedWorkspace
     }
 
-    // Laptop fallback: original Omarchy behavior (reliable filled indicator).
     if (!aw && root.laptopMonitor && Hyprland.focusedWorkspace
         && Hyprland.focusedWorkspace.id >= 1 && Hyprland.focusedWorkspace.id <= 10) {
-      // Only when focus is on a laptop monitor (or unknown).
       if (!Hyprland.focusedMonitor || root.isLaptopName(Hyprland.focusedMonitor.name))
         aw = Hyprland.focusedWorkspace
     }
@@ -149,6 +239,30 @@ BarWidget {
   function focusWorkspace(slot) {
     if (!root.bar) return
     root.bar.run("omarchy-hyprland-workspace-focus " + slot)
+  }
+
+  function bumpHyprEpoch() {
+    root.hyprEpoch++
+  }
+
+  Connections {
+    target: Hyprland
+    function onFocusedWorkspaceChanged() { root.bumpHyprEpoch() }
+    function onFocusedMonitorChanged() { root.bumpHyprEpoch() }
+    function onRawEvent(event) {
+      if (!event || !event.name) return
+      var name = String(event.name)
+      // workspace / workspacev2 / createworkspace / destroyworkspace /
+      // moveworkspace / focusedmon / activewindow* — anything that can move
+      // the filled slot or occupied opacity.
+      if (name.indexOf("workspace") !== -1
+          || name.indexOf("focusedmon") !== -1
+          || name.indexOf("activewindow") !== -1
+          || name.indexOf("monitor") !== -1
+          || name === "configreloaded") {
+        root.bumpHyprEpoch()
+      }
+    }
   }
 
   readonly property real trailingGap: root.vertical ? 0 : Style.spaceReal(1.5)
@@ -171,8 +285,11 @@ BarWidget {
         required property int modelData
 
         readonly property var workspace: root.workspaceBySlot(modelData)
-        readonly property bool occupied: workspace !== null && workspace.toplevels.values.length > 0
-        readonly property bool focused: root.monitorActiveSlot() === modelData
+        readonly property bool occupied: {
+          void root.hyprEpoch
+          return workspace !== null && workspace.toplevels.values.length > 0
+        }
+        readonly property bool focused: root.activeSlot === modelData
 
         bar: root.bar
         text: focused ? "\uDB85\uDCFB" : (modelData === 10 ? "0" : String(modelData))

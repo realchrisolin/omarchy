@@ -650,7 +650,7 @@ if rg -q 'tame_extend_workspaces' "$PLUGIN_BIN/miracast-ctl"; then
   fail "tame_extend_workspaces should be removed for independent Extend workspaces"
 fi
 # Helper maps Miracast SUPER+N to ext-N
-rg -q 'ext-' /home/colin/Work/omarchy/bin/omarchy-hyprland-workspace-focus ||
+rg -q 'ext-' "$ROOT/bin/omarchy-hyprland-workspace-focus" ||
   fail "workspace-focus helper namespaces non-laptop monitors as ext-N"
 pass "Extend uses independent ext-N workspaces; disconnect migrate kept"
 
