@@ -82,7 +82,7 @@ echo 1
 SH
 chmod +x "$stub_bin/omarchy-hyprland-monitor-scaling"
 
-# Recording stub for miracast-ctl when monitor-scale invokes pause/ensure.
+# Recording stub for miracast-ctl when monitor-scale invokes pause/ensure/reseat.
 cat >"$stub_bin/miracast-ctl" <<'SH'
 #!/bin/bash
 echo "$*" >>"${OMARCHY_TEST_CTL_LOG:?}"
@@ -90,6 +90,20 @@ case "${1:-}" in
   pause-capture|pause_capture) echo 'paused=0' ;;
   ensure-capture|ensure_capture) echo '{"ok":true,"captureHealthy":true}' ;;
   restart-capture|restart_capture) echo '{"ok":true,"captureRestarted":true,"captureHealthy":true}' ;;
+  set-extend-position|set_extend_position)
+    # Reseat now goes through ctl (raw hyprctl hung mid lua-reload). Record a
+    # synthetic hl.monitor line so scale-preservation assertions still work.
+    pos="${2:-right}"
+    case "$pos" in
+      left) xy="-960x0" ;;
+      above) xy="0x-540" ;;
+      below) xy="0x540" ;;
+      *) xy="960x0" ;;
+    esac
+    printf '%s\n' "hl.monitor({ output = \"hotyeah-8D5117_P2P\", mode = \"1920x1080@30\", position = \"${xy}\", scale = 2 })" \
+      >>"${OMARCHY_TEST_HYPR_LOG:-/dev/null}"
+    echo "{\"ok\":true,\"position\":\"$pos\",\"applied\":true}"
+    ;;
   *) echo '{"ok":true}' ;;
 esac
 SH
@@ -340,24 +354,24 @@ mkdir -p "$state_dir/logs"
 scale_out="$(run_monitor_scale 2)"
 [[ $scale_out == 2 ]] || fail "monitor-scale reports cleaned scale" "got $scale_out"
 assert_pause_before_hypr_and_ensure "tracked Extend"
-# Reseat preserves the Miracast output's current scale (fixture has scale 2) and
-# must not inherit eDP's new scale onto a fresh default of 1 only.
+# Reseat goes through miracast-ctl set-extend-position (stub writes scale=2).
 grep -E 'output = "hotyeah-8D5117_P2P".*scale = 2' "$hypr_log" >/dev/null ||
   fail "monitor-scale reseat preserves Extend output scale" "hypr log: $(cat "$hypr_log")"
+grep -E 'set-extend-position|set_extend_position' "$ctl_log" >/dev/null ||
+  fail "monitor-scale reseats via set-extend-position" "ctl_log=$(cat "$ctl_log")"
 # While rebinding, skip ScreenMoveRemap nudge (single apply — not nudge+restore).
-# Stub logs both `eval hl.monitor(...)` and the bare lua payload; count payloads.
 edp_evals="$(grep -c '^hl.monitor({ output = "eDP-1"' "$hypr_log" || true)"
 (( edp_evals == 1 )) ||
   fail "monitor-scale applies eDP geometry once while Miracast rebind is needed" "count=$edp_evals hypr=$(cat "$hypr_log")"
-# eDP geometry must be applied before Miracast reseat (persist then glue).
+# eDP geometry must be applied before Miracast reseat (ensure then glue).
 edp_line="$(grep -n 'output = "eDP-1"' "$hypr_log" | head -1 | cut -d: -f1)"
 hot_line="$(grep -n 'output = "hotyeah-8D5117_P2P"' "$hypr_log" | head -1 | cut -d: -f1)"
 [[ -n $edp_line && -n $hot_line ]] ||
   fail "eDP scale writes both primary and Miracast hl.monitor lines" "hypr=$(cat "$hypr_log")"
 (( edp_line < hot_line )) ||
   fail "eDP geometry is applied before Miracast reseat" "eDP=$edp_line hot=$hot_line hypr=$(cat "$hypr_log")"
-grep -F 'reseat_miracast layout (after persist)' "$state_dir/logs/scale.log" >/dev/null ||
-  fail "eDP scale reseats Miracast after monitors.lua persist" "scale.log=$(cat "$state_dir/logs/scale.log")"
+grep -E 'reseat_miracast layout \(after ensure\)|set-extend-position done' "$state_dir/logs/scale.log" >/dev/null ||
+  fail "eDP scale reseats Miracast after ensure" "scale.log=$(cat "$state_dir/logs/scale.log")"
 pass "monitor-scale pauses before eDP remap and ensures capture preserving Extend scale"
 
 # ========== monitor-scale eDP scale glues Miracast to settings extendPosition=left ==========
@@ -378,10 +392,9 @@ grep -E 'output = "hotyeah-8D5117_P2P".*position = "-960x' "$hypr_log" >/dev/nul
   fail "eDP scale reseats Miracast to the left (-960)" "hypr=$(cat "$hypr_log")"
 grep -E 'output = "hotyeah-8D5117_P2P".*scale = 2' "$hypr_log" >/dev/null ||
   fail "left reseat keeps Miracast scale 2" "hypr=$(cat "$hypr_log")"
-grep -F 'reseat_miracast layout (after persist)' "$state_dir/logs/scale.log" >/dev/null ||
-  fail "left-glue path logs after-persist reseat" "scale.log=$(cat "$state_dir/logs/scale.log")"
-# Second eDP scale with layout already correct must skip re-hyprctl on Miracast
-# (avoids killing live capture with a reseat storm).
+grep -E 'reseat_miracast layout \(after ensure\)|set-extend-position done' "$state_dir/logs/scale.log" >/dev/null ||
+  fail "left-glue path logs after-ensure reseat" "scale.log=$(cat "$state_dir/logs/scale.log")"
+# Second eDP scale with layout already correct must skip reseat storm.
 printf '%s\n' '[
   {"name":"eDP-1","focused":true,"width":1920,"height":1080,"scale":2,"refreshRate":60,"x":0,"y":0},
   {"name":"hotyeah-8D5117_P2P","focused":false,"width":1920,"height":1080,"scale":2,"refreshRate":30,"x":-960,"y":0}
@@ -389,13 +402,14 @@ printf '%s\n' '[
 mkdir -p "$state_dir/logs"
 : >"$state_dir/logs/scale.log"
 : >"$hypr_log"
+: >"$ctl_log"
 scale_out="$(run_monitor_scale 2)"
 grep -F 'already at pos=' "$state_dir/logs/scale.log" >/dev/null ||
   fail "apply_miracast_layout skips when already correct" "scale.log=$(cat "$state_dir/logs/scale.log")"
-# No new hyprctl eval for hotyeah on the skip path (eDP may still be applied).
-hot_evals="$(grep -c 'output = "hotyeah-8D5117_P2P"' "$hypr_log" || true)"
-(( hot_evals == 0 )) ||
-  fail "skip path must not re-hyprctl Miracast output" "count=$hot_evals hypr=$(cat "$hypr_log")"
+# Skip path must not call set-extend-position again (would bounce capture).
+setpos_count="$(grep -cE 'set-extend-position|set_extend_position' "$ctl_log" || true)"
+(( setpos_count == 0 )) ||
+  fail "skip path must not re-call set-extend-position" "count=$setpos_count ctl=$(cat "$ctl_log")"
 pass "monitor-scale eDP scale glues Miracast to extendPosition=left after persist"
 
 # ========== monitor-scale: status.json monitor fallback without headless.name ==========
@@ -672,10 +686,12 @@ rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl should document opt-in FLUXCAST_WFD_WF_RECORDER_DAMAGE"
 pass "miracast-ctl leaves damage-aware capture opt-in (not forced)"
 
-# Disconnect safety: never hypr-disable a live Miracast output under capture,
+# Disconnect safety: never hypr-disable a Miracast output (even if cast looks idle),
 # and always pause screencopy before headless remove.
-rg -q 'disp.miracast && miracast && miracast.active' "$PLUGIN/Panel.qml" ||
-  fail "toggleDisplay must stopCast instead of hyprctl-disable on live Miracast"
+rg -q 'isMiracastOutputName' "$PLUGIN/Panel.qml" ||
+  fail "toggleDisplay must detect Miracast outputs beyond disp.miracast+active"
+rg -q 'isMiracastOutputName\(name, disp\)' "$PLUGIN/Panel.qml" ||
+  fail "toggleDisplay must route Miracast checkbox through stopCast"
 rg -q 'pause_extend_capture' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl must define pause_extend_capture"
 rg -q 'wait_capture_senders_gone' "$PLUGIN_BIN/miracast-ctl" ||
@@ -683,6 +699,8 @@ rg -q 'wait_capture_senders_gone' "$PLUGIN_BIN/miracast-ctl" ||
 # cleanup_extend_monitor body should pause before output remove
 awk '/^cleanup_extend_monitor\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capture' ||
   fail "cleanup_extend_monitor must pause capture before removing headless"
+rg -q 'deferring output remove|deferred output remove' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "cleanup must defer hyprctl output remove so Stop does not freeze eDP"
 awk '/^cmd_stop\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capture' ||
   fail "cmd_stop must pause capture before killing FluxCast / removing headless"
 pass "disconnect paths pause capture before disabling Miracast output"
@@ -697,6 +715,18 @@ rg -q 'ensure-capture' "$PLUGIN/MiracastService.qml" ||
 rg -q 'miracast_pause_for_lock|pause-capture' "$ROOT/bin/omarchy-system-lock" ||
   fail "omarchy-system-lock must pause Miracast capture before locking"
 pass "screen lock pauses Miracast capture and resumes after unlock"
+
+# Capture watchdog / position-move rebind
+rg -q 'cmd_capture_health' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must expose capture-health for the shell watchdog"
+rg -q 'CAPTURE_PAUSED_FILE' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must track intentional capture pauses"
+awk '/^ensure_extend_capture_healthy\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'force' ||
+  fail "ensure_extend_capture_healthy must support force rebind"
+rg -q 'capture-health' "$PLUGIN/MiracastService.qml" ||
+  fail "MiracastService must run a capture-health watchdog while streaming"
+pass "capture watchdog and forced position rebind are wired"
+
 
 
 # ========== independent Extend workspaces: ext-N namespace, Lua migrate ==========
