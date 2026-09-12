@@ -699,8 +699,14 @@ rg -q 'wait_capture_senders_gone' "$PLUGIN_BIN/miracast-ctl" ||
 # cleanup_extend_monitor body should pause before output remove
 awk '/^cleanup_extend_monitor\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capture' ||
   fail "cleanup_extend_monitor must pause capture before removing headless"
-rg -q 'deferring output remove|deferred output remove' "$PLUGIN_BIN/miracast-ctl" ||
-  fail "cleanup must defer hyprctl output remove so Stop does not freeze eDP"
+rg -q 'parked\+disabled|PARKED_FILE|remove on next connect' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "cleanup must park/disable headless on Stop (never output remove on disconnect)"
+rg -q 'remove_virtual_output_safe' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "connect path must remove parked headless via remove_virtual_output_safe"
+# Stop/cleanup body must not invoke output remove (comments mentioning it are OK).
+if awk '/^cleanup_extend_monitor\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q '^[^#]*hyprctl[^#]*output remove|timeout [0-9]+ hyprctl output remove'; then
+  fail "cleanup_extend_monitor must not call hyprctl output remove"
+fi
 awk '/^cmd_stop\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capture' ||
   fail "cmd_stop must pause capture before killing FluxCast / removing headless"
 pass "disconnect paths pause capture before disabling Miracast output"
