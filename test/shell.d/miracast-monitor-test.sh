@@ -260,29 +260,68 @@ local omarchy_gdk_scale = 1
 local omarchy_monitor_scale = 1
 LUA
 
+mkdir -p "$state_dir/logs"
+: >"$state_dir/logs/scale.log"
 scale_out="$(run_monitor_scale 2)"
 [[ $scale_out == 2 ]] || fail "monitor-scale reports cleaned scale" "got $scale_out"
 assert_pause_before_hypr_and_ensure "tracked Extend"
-# Reseat must force Extend scale back to 1 (not inherit eDP's 2).
-grep -F 'scale = 1' "$hypr_log" >/dev/null ||
-  fail "monitor-scale reseat forces Extend output scale 1" "hypr log: $(cat "$hypr_log")"
+# Reseat preserves the Miracast output's current scale (fixture has scale 2) and
+# must not inherit eDP's new scale onto a fresh default of 1 only.
+grep -E 'output = "hotyeah-8D5117_P2P".*scale = 2' "$hypr_log" >/dev/null ||
+  fail "monitor-scale reseat preserves Extend output scale" "hypr log: $(cat "$hypr_log")"
 # While rebinding, skip ScreenMoveRemap nudge (single apply — not nudge+restore).
 # Stub logs both `eval hl.monitor(...)` and the bare lua payload; count payloads.
 edp_evals="$(grep -c '^hl.monitor({ output = "eDP-1"' "$hypr_log" || true)"
 (( edp_evals == 1 )) ||
   fail "monitor-scale applies eDP geometry once while Miracast rebind is needed" "count=$edp_evals hypr=$(cat "$hypr_log")"
-pass "monitor-scale pauses before eDP remap and ensures capture with Extend scale 1"
+# eDP geometry must be applied before Miracast reseat (persist then glue).
+edp_line="$(grep -n 'output = "eDP-1"' "$hypr_log" | head -1 | cut -d: -f1)"
+hot_line="$(grep -n 'output = "hotyeah-8D5117_P2P"' "$hypr_log" | head -1 | cut -d: -f1)"
+[[ -n $edp_line && -n $hot_line ]] ||
+  fail "eDP scale writes both primary and Miracast hl.monitor lines" "hypr=$(cat "$hypr_log")"
+(( edp_line < hot_line )) ||
+  fail "eDP geometry is applied before Miracast reseat" "eDP=$edp_line hot=$hot_line hypr=$(cat "$hypr_log")"
+grep -F 'reseat_miracast layout (after persist)' "$state_dir/logs/scale.log" >/dev/null ||
+  fail "eDP scale reseats Miracast after monitors.lua persist" "scale.log=$(cat "$state_dir/logs/scale.log")"
+pass "monitor-scale pauses before eDP remap and ensures capture preserving Extend scale"
+
+# ========== monitor-scale eDP scale glues Miracast to settings extendPosition=left ==========
+printf '%s\n' 'hotyeah-8D5117_P2P' >"$state_dir/headless.name"
+printf '%s\n' '{"extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' \
+  >"$config_dir/settings.json"
+# Start with headless wrongly on the right (as monitors.lua reload does).
+printf '%s\n' '[
+  {"name":"eDP-1","focused":true,"width":1920,"height":1080,"scale":2,"refreshRate":60,"x":0,"y":0},
+  {"name":"hotyeah-8D5117_P2P","focused":false,"width":1920,"height":1080,"scale":2,"refreshRate":30,"x":960,"y":0}
+]' >"$monitors_file"
+mkdir -p "$state_dir/logs"
+: >"$state_dir/logs/scale.log"
+scale_out="$(run_monitor_scale 2)"
+[[ $scale_out == 2 ]] || fail "left-glue eDP scale returns 2" "got $scale_out"
+# Left of eDP at scale 2 → Miracast logical width 960 → position -960x…
+grep -E 'output = "hotyeah-8D5117_P2P".*position = "-960x' "$hypr_log" >/dev/null ||
+  fail "eDP scale reseats Miracast to the left (-960)" "hypr=$(cat "$hypr_log")"
+grep -E 'output = "hotyeah-8D5117_P2P".*scale = 2' "$hypr_log" >/dev/null ||
+  fail "left reseat keeps Miracast scale 2" "hypr=$(cat "$hypr_log")"
+grep -F 'reseat_miracast layout (after persist)' "$state_dir/logs/scale.log" >/dev/null ||
+  fail "left-glue path logs after-persist reseat" "scale.log=$(cat "$state_dir/logs/scale.log")"
+pass "monitor-scale eDP scale glues Miracast to extendPosition=left after persist"
 
 # ========== monitor-scale: status.json monitor fallback without headless.name ==========
 rm -f "$state_dir/headless.name"
 printf '%s\n' '{"phase":"streaming","monitor":"hotyeah-8D5117_P2P","extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' \
   >"$state_dir/status.json"
-# settings still needed for reseat geometry
-printf '%s\n' '{"extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' >"$config_dir/settings.json"
+printf '%s\n' '{"extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' \
+  >"$config_dir/settings.json"
+printf '%s\n' '[
+  {"name":"eDP-1","focused":true,"width":1920,"height":1080,"scale":1,"refreshRate":60,"x":0,"y":0},
+  {"name":"hotyeah-8D5117_P2P","focused":false,"width":1920,"height":1080,"scale":2,"refreshRate":30,"x":1920,"y":0}
+]' >"$monitors_file"
 scale_out="$(run_monitor_scale 1.6)"
-# clean_scale may normalize 1.6
 [[ -n $scale_out ]] || fail "monitor-scale returns a scale with status.json fallback"
 assert_pause_before_hypr_and_ensure "status.json fallback"
+grep -E 'output = "hotyeah-8D5117_P2P".*position = "-' "$hypr_log" >/dev/null ||
+  fail "status.json fallback still reseats using settings extendPosition=left" "hypr=$(cat "$hypr_log")"
 pass "monitor-scale rebinds using status.json monitor when headless.name is missing"
 
 # ========== monitor-scale: hyprctl hang still schedules deferred ensure ==========
@@ -354,6 +393,59 @@ grep -F 'done ' "$scale_log_file" >/dev/null ||
 grep -F 'hyprctl eval failed/timeout' "$scale_log_file" >/dev/null ||
   fail "scale.log records hyprctl timeout" "scale.log=$(cat "$scale_log_file")"
 pass "monitor-scale recovers via timeout + ensure when hyprctl hangs after pause"
+
+# ========== Miracast virtual scale: no-op when unchanged; apply when different ==========
+cp "$SCALE_SRC" "$fake_plugin_bin/monitor-scale"
+chmod +x "$fake_plugin_bin/monitor-scale"
+printf '%s\n' 'hotyeah-8D5117_P2P' >"$state_dir/headless.name"
+printf '%s\n' '{"extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' \
+  >"$config_dir/settings.json"
+printf '%s\n' '[
+  {"name":"eDP-1","focused":true,"width":1920,"height":1080,"scale":2,"refreshRate":60,"x":0,"y":0},
+  {"name":"hotyeah-8D5117_P2P","focused":false,"width":1920,"height":1080,"scale":1,"refreshRate":30,"x":-1920,"y":0}
+]' >"$monitors_file"
+: >"$ctl_log"
+: >"$hypr_log"
+virt_same="$(
+  HOME="$home_dir" \
+    XDG_STATE_HOME="$home_dir/.local/state" \
+    XDG_CONFIG_HOME="$home_dir/.config" \
+    PATH="$stub_bin:$PATH" \
+    OMARCHY_TEST_MONITORS="$monitors_file" \
+    OMARCHY_TEST_HYPR_LOG="$hypr_log" \
+    OMARCHY_TEST_CTL_LOG="$ctl_log" \
+    OMARCHY_TEST_DEFER_SLEEP=60 \
+    OMARCHY_TEST_ENSURE_SLEEP=0 \
+    bash "$fake_plugin_bin/monitor-scale" hotyeah-8D5117_P2P 1
+)"
+[[ $virt_same == 1 ]] || fail "virtual same-scale returns 1" "got $virt_same"
+if grep -E 'pause-capture|pause_capture' "$ctl_log" >/dev/null; then
+  fail "virtual same-scale no-op must not pause capture" "ctl=$(cat "$ctl_log")"
+fi
+pass "monitor-scale no-ops Miracast virtual scale when unchanged"
+
+: >"$ctl_log"
+: >"$hypr_log"
+virt_out="$(
+  HOME="$home_dir" \
+    XDG_STATE_HOME="$home_dir/.local/state" \
+    XDG_CONFIG_HOME="$home_dir/.config" \
+    PATH="$stub_bin:$PATH" \
+    OMARCHY_TEST_MONITORS="$monitors_file" \
+    OMARCHY_TEST_HYPR_LOG="$hypr_log" \
+    OMARCHY_TEST_CTL_LOG="$ctl_log" \
+    OMARCHY_TEST_DEFER_SLEEP=60 \
+    OMARCHY_TEST_ENSURE_SLEEP=0 \
+    bash "$fake_plugin_bin/monitor-scale" hotyeah-8D5117_P2P 2
+)"
+[[ $virt_out == 2 ]] || fail "virtual scale change returns requested scale" "got $virt_out"
+grep -E 'pause-capture|pause_capture' "$ctl_log" >/dev/null ||
+  fail "virtual scale change pauses capture" "ctl=$(cat "$ctl_log")"
+grep -E 'output = "hotyeah-8D5117_P2P".*scale = 2' "$hypr_log" >/dev/null ||
+  fail "virtual scale change applies hyprctl scale 2" "hypr=$(cat "$hypr_log")"
+grep -E 'ensure-capture|ensure_capture' "$ctl_log" >/dev/null ||
+  fail "virtual scale change ensures capture" "ctl=$(cat "$ctl_log")"
+pass "monitor-scale applies Miracast virtual scale changes with pause/ensure"
 
 # ========== fluxcast_pid ignores shell wrappers that mention main.py ==========
 extract_fn fluxcast_pid "$test_tmp/fluxcast_pid.sh"
@@ -429,6 +521,54 @@ const parsed = Model.parseDisplays(JSON.stringify([
 ]))
 assertEqual(parsed.enabledDisplayCount, 2, 'parseDisplays counts enabled displays')
 assertEqual(parsed.displays[1].miracast, true, 'parseDisplays preserves miracast flag')
+
+assertEqual(
+  Model.inferExtendPosition([
+    { name: 'eDP-1', enabled: true, focused: true, width: 1920, height: 1080, scale: 2, x: 0, y: 0, miracast: false },
+    { name: 'hotyeah', enabled: true, focused: false, width: 1920, height: 1080, scale: 2, x: -960, y: 0, miracast: true }
+  ]),
+  'left',
+  'inferExtendPosition left of primary'
+)
+assertEqual(
+  Model.inferExtendPosition([
+    { name: 'eDP-1', enabled: true, focused: true, width: 1920, height: 1080, scale: 2, x: 0, y: 0, miracast: false },
+    { name: 'hotyeah', enabled: true, focused: false, width: 1920, height: 1080, scale: 2, x: 960, y: 0, miracast: true }
+  ]),
+  'right',
+  'inferExtendPosition right of primary'
+)
+assertEqual(
+  Model.inferExtendPosition([
+    { name: 'eDP-1', enabled: true, focused: true, width: 1920, height: 1080, scale: 1, x: 0, y: 0, miracast: false },
+    { name: 'hotyeah', enabled: true, focused: false, width: 1920, height: 1080, scale: 1, x: 0, y: -1080, miracast: true }
+  ]),
+  'above',
+  'inferExtendPosition above primary'
+)
+assertEqual(
+  Model.inferExtendPosition([
+    { name: 'eDP-1', enabled: true, focused: true, width: 1920, height: 1080, scale: 1, x: 0, y: 0, miracast: false },
+    { name: 'hotyeah', enabled: true, focused: false, width: 1920, height: 1080, scale: 1, x: 0, y: 1080, miracast: true }
+  ]),
+  'below',
+  'inferExtendPosition below primary'
+)
+assertEqual(
+  Model.inferExtendPosition([
+    { name: 'eDP-1', enabled: true, focused: true, width: 1920, height: 1080, scale: 1.6, x: 0, y: 0, miracast: false },
+    { name: 'hotyeah', enabled: true, focused: false, width: 1920, height: 1080, scale: 2, x: 1200, y: 0, miracast: true }
+  ]),
+  'right',
+  'inferExtendPosition right after lua-reload shove (eDP 1.6 / Miracast 2)'
+)
+assertEqual(
+  Model.inferExtendPosition([
+    { name: 'eDP-1', enabled: true, focused: true, width: 1920, height: 1080, scale: 1, x: 0, y: 0, miracast: false }
+  ]),
+  '',
+  'inferExtendPosition empty without Miracast output'
+)
 JS
 
 pass "miracast monitor regression coverage"
