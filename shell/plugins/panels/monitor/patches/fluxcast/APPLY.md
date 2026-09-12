@@ -58,7 +58,29 @@ export FLUXCAST_ROOT="${FLUXCAST_ROOT:-$HOME/code/other/fluxcast}"
 `miracast-ctl` exports (when casting):
 
 - `FLUXCAST_WFD_ENCODER` from settings `videoEncoder` (default `auto` → VAAPI/QSV when available)
+- `FLUXCAST_WFD_CAPTURE_ENCODE=auto` when the encoder is `auto`/`vaapi`/`qsv` (DMA-BUF preferred)
 - `FLUXCAST_WFD_MODE_STATE` for stream-mode pills in the Display panel
+
+### Capture encode path (DMA-BUF + CQP)
+
+Omarchy’s Display panel shows **RENDER ENGINE** pills on the Miracast
+display row only while connected (`dmabuf` / `vaapi` / `cpu`). Preference
+lives in `settings.captureEncode` and `$STATE_DIR/capture-encode` for live
+rebind; GPU failures fall back to CPU and the active pill follows the
+resolved path.
+
+When `FLUXCAST_WFD_CAPTURE_ENCODE` is `auto`/`vaapi`, FluxCast prefers:
+
+`wf-recorder -c h264_vaapi` (DMA-BUF) → `scale_vaapi=format=nv12:out_range=tv`
+→ CQP (`qp=18` by default, override with `FLUXCAST_WFD_VAAPI_QP`) → ffmpeg `-c:v copy`
+
+Scaled Hyprland outputs are included (logical region in logs is normal; the
+DMA buffer is still physical mode size). Deny scaled DMA with
+`FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0`. Force the old pipe with
+`FLUXCAST_WFD_CAPTURE_ENCODE=pipe`.
+
+Do **not** pass `wf-recorder -r` on the DMA path (it appends `fps=` after
+`scale_vaapi` and glitches). Keep `bf=0` + constrained baseline.
 
 Optional (not set by default — continuous `wf-recorder -D` is preferred on
 virtual Extend outputs for fewer wakeups / lower battery draw):
@@ -66,6 +88,6 @@ virtual Extend outputs for fewer wakeups / lower battery draw):
 - `FLUXCAST_WFD_WF_RECORDER_DAMAGE=1` (omit `wf-recorder -D` for damage-aware capture)
 
 Without these patches the panel still works against stock FluxCast, but you
-lose GPU encode opt-in wiring, optional damage-aware capture, live **STREAM MODE**
-capability discovery, and safe eDP scale capture rebind (`ensure-capture` /
-SIGUSR1).
+lose GPU encode opt-in wiring, DMA-BUF/CQP desktop quality, optional
+damage-aware capture, live **STREAM MODE** capability discovery, and safe
+eDP scale capture rebind (`ensure-capture` / SIGUSR1).

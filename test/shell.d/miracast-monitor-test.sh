@@ -686,11 +686,13 @@ rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl should document opt-in FLUXCAST_WFD_WF_RECORDER_DAMAGE"
 pass "miracast-ctl leaves damage-aware capture opt-in (not forced)"
 
-# ========== capture encode: DMA-BUF auto + scaled allow ==========
-rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE' "$PLUGIN_BIN/miracast-ctl" ||
-  fail "miracast-ctl must export FLUXCAST_WFD_CAPTURE_ENCODE for DMA-BUF vs pipe"
-rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE="\$\{FLUXCAST_WFD_CAPTURE_ENCODE:-auto\}"' "$PLUGIN_BIN/miracast-ctl" ||
-  fail "GPU encoder path must default FLUXCAST_WFD_CAPTURE_ENCODE to auto"
+# ========== capture encode / RENDER ENGINE ==========
+rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE_FILE' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must export FLUXCAST_WFD_CAPTURE_ENCODE_FILE for live RENDER ENGINE switches"
+rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE_PREF' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must export FLUXCAST_WFD_CAPTURE_ENCODE_PREF"
+rg -q 'dmabuf\) export FLUXCAST_WFD_CAPTURE_ENCODE=vaapi' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "dmabuf preference must map legacy CAPTURE_ENCODE=vaapi"
 rg -q 'FLUXCAST_WFD_DMABUF_ALLOW_SCALED' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl must mention FLUXCAST_WFD_DMABUF_ALLOW_SCALED escape hatch"
 # Must not force-deny scaled DMA by default.
@@ -699,14 +701,46 @@ if rg -q 'export FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0' "$PLUGIN_BIN/miracast-ctl";
 fi
 rg -q '"bitrate": "8M"' "$PLUGIN_BIN/miracast-ctl" ||
   fail "default settings bitrate should be 8M (pipe fallback floor)"
-# FluxCast patch must keep DMA CQP + tv-range recipe.
+# FluxCast patch must keep DMA CQP + tv-range recipe + GPU→CPU cascade.
 PATCH_WL="$PLUGIN/patches/fluxcast/src/wfd/media/wlroots.py"
 [ -f "$PATCH_WL" ] || fail "missing FluxCast wlroots patch at $PATCH_WL"
 rg -q 'rc_mode=CQP' "$PATCH_WL" || fail "DMA path patch must use rc_mode=CQP"
 rg -q 'out_range=tv' "$PATCH_WL" || fail "DMA path patch must use scale_vaapi out_range=tv"
+rg -q 'capture_encode_attempts' "$PATCH_WL" ||
+  fail "wlroots patch must cascade RENDER ENGINE attempts"
 rg -q 'prefer_wf_recorder_vaapi_dmabuf' "$PLUGIN/patches/fluxcast/src/wfd/hw_encode.py" ||
   fail "hw_encode patch must expose prefer_wf_recorder_vaapi_dmabuf"
+rg -q 'capture_encode_preference' "$PLUGIN/patches/fluxcast/src/wfd/hw_encode.py" ||
+  fail "hw_encode patch must expose capture_encode_preference"
 pass "miracast-ctl opts into DMA-BUF capture encode (scaled allowed by default)"
+rg -q 'set-capture-encode' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must expose set-capture-encode for RENDER ENGINE pills"
+rg -q '"captureEncode": "dmabuf"' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "default captureEncode should be dmabuf"
+rg -q 'attach_capture_encode_fields' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "status must attach captureEncode/capturePath fields"
+# UI: RENDER ENGINE only while session active (Miracast display row).
+rg -q 'RENDER ENGINE' "$PLUGIN/Panel.qml" ||
+  fail "Panel.qml must label RENDER ENGINE pills"
+rg -q 'setCaptureEncode' "$PLUGIN/MiracastService.qml" ||
+  fail "MiracastService must expose setCaptureEncode"
+rg -q 'miracastCaptureEncodeActive' "$PLUGIN/Model.js" ||
+  fail "Model.js must map resolved capture path to active pill"
+# Gate: RENDER ENGINE column must require showMiracastSessionControls (not pre-connect).
+rg -n -B6 'text: "RENDER ENGINE"' "$PLUGIN/Panel.qml" | rg -q 'showMiracastSessionControls' ||
+  fail "RENDER ENGINE must be gated on showMiracastSessionControls (connected only)"
+if command -v node >/dev/null 2>&1; then
+  node <<'JS' || fail "Model.js miracastCaptureEncodeActive mapping"
+const M = require(process.env.PLUGIN + "/Model.js");
+const assert = (c, m) => { if (!c) { console.error(m); process.exit(1); } };
+assert(M.miracastCaptureEncodeActive("dmabuf", "h264_vaapi", "cpu") === "dmabuf", "dmabuf");
+assert(M.miracastCaptureEncodeActive("pipe", "h264_vaapi", "dmabuf") === "vaapi", "vaapi");
+assert(M.miracastCaptureEncodeActive("pipe", "libx264", "dmabuf") === "cpu", "cpu");
+assert(M.miracastCaptureEncodeActive("", "", "vaapi") === "vaapi", "pref");
+JS
+fi
+pass "miracast-ctl RENDER ENGINE captureEncode wiring"
+
 
 # Disconnect safety: never hypr-disable a Miracast output (even if cast looks idle),
 # and always pause screencopy before headless remove.

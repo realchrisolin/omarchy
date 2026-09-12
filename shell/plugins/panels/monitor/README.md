@@ -18,6 +18,7 @@ from `bin/miracast-ctl` on each read.
 | `videoEncoder` | `auto` | `auto` → VAAPI / QSV / software |
 | *(env)* `FLUXCAST_WFD_CAPTURE_ENCODE` | `auto` when GPU encoder | `auto`/`vaapi` = wf-recorder DMA-BUF (incl. scaled outputs); `pipe` = legacy raw→hwupload |
 | *(env)* `FLUXCAST_WFD_DMABUF_ALLOW_SCALED` | allow (default) | `0`/`false` = force pipe when Hyprland scale ≠ 1 |
+| `captureEncode` | `dmabuf` | RENDER ENGINE: `dmabuf` (GPU·DMA-BUF) / `vaapi` (GPU·VAAPI) / `cpu` |
 | *(env)* `FLUXCAST_WFD_VAAPI_QP` | `18` | DMA CQP quantizer (lower = sharper / more bitrate) |
 | `sinkScales` | `{}` | Per-sink Extend scale, keyed by MAC |
 | `onlyExpandFocusedDisplay` | `false` | `false` = expand all display rows; `true` = accordion (focused only) |
@@ -33,8 +34,13 @@ from `bin/miracast-ctl` on each read.
 - **`true`:** only one row expanded (follows focused output) — previous accordion.
 
 While Miracast is connected, cast session controls (**CAST MODE**, **EXTEND
-POSITION**, **STREAM MODE**) appear under the Miracast display row next to
-**SCALE**. Scan / firewall / doctor / Stop remain under the **MIRACAST** section.
+POSITION**, **STREAM MODE**, **RENDER ENGINE**) appear under the Miracast
+display row next to **SCALE**. Scan / firewall / doctor / Stop remain under the
+**MIRACAST** section.
+
+**RENDER ENGINE** (connected only): `dmabuf` / `vaapi` / `cpu` — default DMA-BUF.
+GPU failures fall back to CPU; the active pill tracks the resolved encode path.
+See `miracast-ctl set-capture-encode` and `captureEncode` in settings.
 
 ## Virtual output lifecycle (eDP safety)
 
