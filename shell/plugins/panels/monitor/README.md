@@ -14,9 +14,11 @@ from `bin/miracast-ctl` on each read.
 | `fps` | `20` | Fallback when `streamMode` is unset |
 | `outputRes` | `1280x720` | Encoded size (fallback) |
 | `extendResolution` | `1280x720` | Extend virtual output size (fallback) |
-| `bitrate` | `4M` | Trimmed further on battery / power-saver |
+| `bitrate` | `8M` | Pipe-path / fallback bitrate; DMA path uses CQP (not this ceiling) |
 | `videoEncoder` | `auto` | `auto` → VAAPI / QSV / software |
-| *(env)* `FLUXCAST_WFD_CAPTURE_ENCODE` | `auto` when GPU encoder | `auto`/`vaapi` = wf-recorder DMA-BUF; `pipe` = legacy raw→hwupload |
+| *(env)* `FLUXCAST_WFD_CAPTURE_ENCODE` | `auto` when GPU encoder | `auto`/`vaapi` = wf-recorder DMA-BUF (incl. scaled outputs); `pipe` = legacy raw→hwupload |
+| *(env)* `FLUXCAST_WFD_DMABUF_ALLOW_SCALED` | allow (default) | `0`/`false` = force pipe when Hyprland scale ≠ 1 |
+| *(env)* `FLUXCAST_WFD_VAAPI_QP` | `18` | DMA CQP quantizer (lower = sharper / more bitrate) |
 | `sinkScales` | `{}` | Per-sink Extend scale, keyed by MAC |
 | `onlyExpandFocusedDisplay` | `false` | `false` = expand all display rows; `true` = accordion (focused only) |
 

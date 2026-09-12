@@ -686,6 +686,28 @@ rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl should document opt-in FLUXCAST_WFD_WF_RECORDER_DAMAGE"
 pass "miracast-ctl leaves damage-aware capture opt-in (not forced)"
 
+# ========== capture encode: DMA-BUF auto + scaled allow ==========
+rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must export FLUXCAST_WFD_CAPTURE_ENCODE for DMA-BUF vs pipe"
+rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE="\$\{FLUXCAST_WFD_CAPTURE_ENCODE:-auto\}"' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "GPU encoder path must default FLUXCAST_WFD_CAPTURE_ENCODE to auto"
+rg -q 'FLUXCAST_WFD_DMABUF_ALLOW_SCALED' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must mention FLUXCAST_WFD_DMABUF_ALLOW_SCALED escape hatch"
+# Must not force-deny scaled DMA by default.
+if rg -q 'export FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0' "$PLUGIN_BIN/miracast-ctl"; then
+  fail "miracast-ctl must not force FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0"
+fi
+rg -q '"bitrate": "8M"' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "default settings bitrate should be 8M (pipe fallback floor)"
+# FluxCast patch must keep DMA CQP + tv-range recipe.
+PATCH_WL="$PLUGIN/patches/fluxcast/src/wfd/media/wlroots.py"
+[ -f "$PATCH_WL" ] || fail "missing FluxCast wlroots patch at $PATCH_WL"
+rg -q 'rc_mode=CQP' "$PATCH_WL" || fail "DMA path patch must use rc_mode=CQP"
+rg -q 'out_range=tv' "$PATCH_WL" || fail "DMA path patch must use scale_vaapi out_range=tv"
+rg -q 'prefer_wf_recorder_vaapi_dmabuf' "$PLUGIN/patches/fluxcast/src/wfd/hw_encode.py" ||
+  fail "hw_encode patch must expose prefer_wf_recorder_vaapi_dmabuf"
+pass "miracast-ctl opts into DMA-BUF capture encode (scaled allowed by default)"
+
 # Disconnect safety: never hypr-disable a Miracast output (even if cast looks idle),
 # and always pause screencopy before headless remove.
 rg -q 'isMiracastOutputName' "$PLUGIN/Panel.qml" ||

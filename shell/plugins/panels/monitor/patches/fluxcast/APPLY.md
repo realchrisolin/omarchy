@@ -7,11 +7,11 @@ variables set by `miracast-ctl`; damage-aware capture remains opt-in.
 
 | File | Purpose |
 |------|---------|
-| `src/wfd/hw_encode.py` | Optional VAAPI/QSV encode; battery / power-saver bias when GPU is opted in |
+| `src/wfd/hw_encode.py` | Optional VAAPI/QSV encode; capture-encode mode (DMA-BUF vs pipe); battery bias |
 | `src/wfd/mode_state.py` | Persist sink-advertised stream modes for the UI (`FLUXCAST_WFD_MODE_STATE`) |
 | `src/wfd/config.py` | `peer_address` for mode-state JSON |
 | `src/wfd/session.py` | SIGUSR1 capture rebind loop; peer MAC on media config |
-| `src/wfd/media/wlroots.py` | Wire HW encode plan; damage-aware `wf-recorder` when `FLUXCAST_WFD_WF_RECORDER_DAMAGE=1` |
+| `src/wfd/media/wlroots.py` | DMA-BUF `h264_vaapi`+CQP path; NV12 pipe fallback; damage-aware opt-in |
 | `src/wfd/media/pipeline.py` | Desktop `restart_video()` + `restarting` flag |
 | `src/wfd/rtsp/handler.py` | Mode state after negotiation; bare-Session M16; probe grace |
 | `src/wfd/rtsp/rtsp_server.py` | `restart_active_media()` for SIGUSR1 rebind |
