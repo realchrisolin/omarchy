@@ -687,6 +687,18 @@ awk '/^cmd_stop\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capt
   fail "cmd_stop must pause capture before killing FluxCast / removing headless"
 pass "disconnect paths pause capture before disabling Miracast output"
 
+# Screen lock: pause capture on lock, ensure on unlock (screencopy dies under hyprlock).
+rg -q 'pauseCaptureForLock' "$PLUGIN/MiracastService.qml" ||
+  fail "MiracastService must pause capture when the session locks"
+rg -q 'omarchy-hyprland-session-locked' "$PLUGIN/MiracastService.qml" ||
+  fail "MiracastService must poll omarchy-hyprland-session-locked"
+rg -q 'ensure-capture' "$PLUGIN/MiracastService.qml" ||
+  fail "MiracastService must ensure-capture after unlock"
+rg -q 'miracast_pause_for_lock|pause-capture' "$ROOT/bin/omarchy-system-lock" ||
+  fail "omarchy-system-lock must pause Miracast capture before locking"
+pass "screen lock pauses Miracast capture and resumes after unlock"
+
+
 # ========== independent Extend workspaces: ext-N namespace, Lua migrate ==========
 extract_fn migrate_workspaces_from_monitor "$test_tmp/migrate.sh"
 extract_fn seed_extend_workspaces "$test_tmp/seed.sh"

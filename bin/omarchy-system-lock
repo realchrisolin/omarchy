@@ -5,6 +5,24 @@
 # omarchy:name=lock
 # omarchy:examples=omarchy system lock
 
+# Detach Miracast screencopy before the session lock blanks outputs — locking
+# under a live wf-recorder has left the TV frozen while RTSP stayed up.
+miracast_pause_for_lock() {
+  local ctl status
+  for ctl in \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/colin.monitor/bin/miracast-ctl" \
+    "${OMARCHY_PATH:-/usr/share/omarchy}/shell/plugins/panels/monitor/bin/miracast-ctl"
+  do
+    [[ -x $ctl ]] || continue
+    status="$("$ctl" status 2>/dev/null || true)"
+    [[ $status == *'"phase":"streaming"'* || $status == *'"running":true'* ]] || continue
+    "$ctl" pause-capture >/dev/null 2>&1 || true
+    return 0
+  done
+  return 0
+}
+miracast_pause_for_lock
+
 omarchy-shell lock lock >/dev/null
 
 # Set keyboard layout to default (first layout)
