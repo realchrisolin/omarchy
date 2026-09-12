@@ -347,6 +347,22 @@ grep -E 'output = "hotyeah-8D5117_P2P".*scale = 2' "$hypr_log" >/dev/null ||
   fail "left reseat keeps Miracast scale 2" "hypr=$(cat "$hypr_log")"
 grep -F 'reseat_miracast layout (after persist)' "$state_dir/logs/scale.log" >/dev/null ||
   fail "left-glue path logs after-persist reseat" "scale.log=$(cat "$state_dir/logs/scale.log")"
+# Second eDP scale with layout already correct must skip re-hyprctl on Miracast
+# (avoids killing live capture with a reseat storm).
+printf '%s\n' '[
+  {"name":"eDP-1","focused":true,"width":1920,"height":1080,"scale":2,"refreshRate":60,"x":0,"y":0},
+  {"name":"hotyeah-8D5117_P2P","focused":false,"width":1920,"height":1080,"scale":2,"refreshRate":30,"x":-960,"y":0}
+]' >"$monitors_file"
+mkdir -p "$state_dir/logs"
+: >"$state_dir/logs/scale.log"
+: >"$hypr_log"
+scale_out="$(run_monitor_scale 2)"
+grep -F 'already at pos=' "$state_dir/logs/scale.log" >/dev/null ||
+  fail "apply_miracast_layout skips when already correct" "scale.log=$(cat "$state_dir/logs/scale.log")"
+# No new hyprctl eval for hotyeah on the skip path (eDP may still be applied).
+hot_evals="$(grep -c 'output = "hotyeah-8D5117_P2P"' "$hypr_log" || true)"
+(( hot_evals == 0 )) ||
+  fail "skip path must not re-hyprctl Miracast output" "count=$hot_evals hypr=$(cat "$hypr_log")"
 pass "monitor-scale eDP scale glues Miracast to extendPosition=left after persist"
 
 # ========== monitor-scale: status.json monitor fallback without headless.name ==========
