@@ -34,11 +34,10 @@ from `bin/miracast-ctl` on each read.
   connected outputs expand too. Rows can still be collapsed individually.
 - **`true`:** only one row expanded (follows focused output) — previous accordion.
 
-While Miracast is connected, cast session controls (**CAST MODE** and
-**EXTEND POSITION** ← ↑ ↓ → on one row with a separator when Extend is active,
-**STREAM MODE**, **RENDER ENGINE**) appear under the Miracast display row next
-to **SCALE**. Scan / firewall / doctor / Stop remain under the **MIRACAST**
-section.
+While Miracast is connected, the Miracast display row shows **CAST MODE** /
+**EXTEND POSITION** first (← ↑ ↓ → when Extend), then **SCALE**, **STREAM
+MODE**, and **RENDER ENGINE**. Scan / firewall / doctor / Stop remain under
+the **MIRACAST** section.
 
 With focus on the CAST MODE / EXTEND POSITION row and Extend active, vim
 **hjkl** set position: **h** ← left, **j** ↓ below, **k** ↑ above, **l** → right.
