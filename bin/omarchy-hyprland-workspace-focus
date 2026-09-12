@@ -1,0 +1,40 @@
+#!/bin/bash
+# Focus "workspace N" on the currently focused monitor with per-display
+# independence:
+#   - Laptop panels (eDP/LVDS/DSI): numeric workspaces 1-10
+#   - Other monitors (Miracast Extend, HDMI, …): named workspaces ext-1..ext-10
+# So SUPER+3 on eDP never touches ext-3 on the TV, and vice versa.
+# Moving windows between displays is intentionally not handled here.
+
+set -euo pipefail
+
+n="${1:-}"
+[[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= 10 )) || exit 1
+
+is_laptop_monitor() {
+  case "${1:-}" in
+    eDP*|LVDS*|DSI*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+json_monitors="$(hyprctl -j monitors 2>/dev/null || true)"
+[[ -n "$json_monitors" ]] || exit 1
+
+current_mon="$(python3 -c '
+import json, sys
+ms = json.loads(sys.argv[1])
+m = next((x for x in ms if x.get("focused")), None)
+print((m or {}).get("name") or "")
+' "$json_monitors")"
+[[ -n "$current_mon" ]] || exit 1
+
+if is_laptop_monitor "$current_mon"; then
+  target="$n"
+else
+  target="name:ext-${n}"
+fi
+
+# Ensure we are on this monitor, then focus the namespaced workspace there.
+hyprctl dispatch "hl.dsp.focus({ monitor = \"${current_mon}\" })" >/dev/null
+hyprctl dispatch "hl.dsp.focus({ workspace = \"${target}\", on_current_monitor = true })" >/dev/null

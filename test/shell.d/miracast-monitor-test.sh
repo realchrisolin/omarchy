@@ -629,23 +629,20 @@ assertEqual(
 )
 JS
 
-# ========== tame_extend_workspaces / migrate use Hyprland 0.56 Lua dispatch ==========
+# ========== independent Extend workspaces: ext-N namespace, Lua migrate ==========
 extract_fn migrate_workspaces_from_monitor "$test_tmp/migrate.sh"
-extract_fn tame_extend_workspaces "$test_tmp/tame.sh"
+extract_fn seed_extend_workspaces "$test_tmp/seed.sh"
 rg -q 'hl.dsp.workspace.move' "$test_tmp/migrate.sh" ||
   fail "migrate_workspaces_from_monitor uses Lua workspace.move"
-rg -q 'hl.workspace_rule' "$test_tmp/tame.sh" ||
-  fail "tame_extend_workspaces uses hl.workspace_rule"
-rg -q 'special:miracast' "$test_tmp/tame.sh" ||
-  fail "tame_extend_workspaces parks special:miracast on cast output"
-rg -q 'prev_ws' "$test_tmp/tame.sh" ||
-  fail "tame_extend_workspaces restores prior eDP workspace after setup"
-# Streaming health loop must not call tame (cursor-steal regression).
-health_block="$(awk '/saw_play.*-eq 1/,/sleep 1/' "$PLUGIN_BIN/miracast-ctl" || true)"
-echo "$health_block" | rg -q 'tame_extend_workspaces' &&
-  fail "streaming health loop must not call tame_extend_workspaces" \
-    "block=$(echo "$health_block" | head -20)"
-pass "Extend workspace taming uses Hyprland Lua APIs"
+rg -q 'name:ext-1' "$test_tmp/seed.sh" ||
+  fail "seed_extend_workspaces creates named ext-1 on cast output"
+if rg -q 'tame_extend_workspaces' "$PLUGIN_BIN/miracast-ctl"; then
+  fail "tame_extend_workspaces should be removed for independent Extend workspaces"
+fi
+# Helper maps Miracast SUPER+N to ext-N
+rg -q 'ext-' /home/colin/Work/omarchy/bin/omarchy-hyprland-workspace-focus ||
+  fail "workspace-focus helper namespaces non-laptop monitors as ext-N"
+pass "Extend uses independent ext-N workspaces; disconnect migrate kept"
 
 # ========== monitor-scale persists Extend scale via remember-extend-scale ==========
 cp "$SCALE_SRC" "$fake_plugin_bin/monitor-scale"
