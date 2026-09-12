@@ -629,6 +629,16 @@ assertEqual(
 )
 JS
 
+# ========== capture env: do not force damage-aware wf-recorder ==========
+# Continuous -D is the default; damage-aware capture is opt-in because it can
+# raise wakeups/battery draw on virtual Extend outputs.
+if rg -q 'export FLUXCAST_WFD_WF_RECORDER_DAMAGE=1' "$PLUGIN_BIN/miracast-ctl"; then
+  fail "miracast-ctl must not force FLUXCAST_WFD_WF_RECORDER_DAMAGE=1"
+fi
+rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl should document opt-in FLUXCAST_WFD_WF_RECORDER_DAMAGE"
+pass "miracast-ctl leaves damage-aware capture opt-in (not forced)"
+
 # ========== independent Extend workspaces: ext-N namespace, Lua migrate ==========
 extract_fn migrate_workspaces_from_monitor "$test_tmp/migrate.sh"
 extract_fn seed_extend_workspaces "$test_tmp/seed.sh"
