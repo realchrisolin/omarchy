@@ -139,15 +139,29 @@ def power_bias() -> str:
 
 
 def _level_to_idc(level: str) -> str:
-    """Convert FluxCast levels like '3.1' / '4.0' to VAAPI level_idc '31' / '40'."""
-    text = (level or "3.1").strip()
+    """Convert FluxCast levels like '3.1' / '4.0' to VAAPI level_idc '31' / '40'.
+
+    Empty / whitespace-only input defaults to H.264 Level 3.1 (``31``), the
+    common WFD HD floor. Digits-only values are returned as-is (already idc).
+    Any other unparseable non-empty string raises ``ValueError``.
+    """
+    text = (level or "").strip()
+    if not text:
+        return "31"
     if text.isdigit():
         return text
     try:
-        major, minor = text.split(".", 1)
-        return f"{int(major)}{int(minor)}"
-    except Exception:
-        return "31"
+        major_s, minor_s = text.split(".", 1)
+        major, minor = int(major_s), int(minor_s)
+    except ValueError as exc:
+        raise ValueError(
+            f"unsupported H.264 level {level!r}; expected 'M.m' (e.g. '3.1') or idc digits"
+        ) from exc
+    if major < 0 or minor < 0 or minor > 9:
+        raise ValueError(
+            f"unsupported H.264 level {level!r}; minor digit must be 0-9"
+        )
+    return f"{major}{minor}"
 
 
 def _map_vaapi_profile(h264_profile: str) -> str:
