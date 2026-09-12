@@ -170,7 +170,49 @@ parts="$(extend_geometry_parts right)"
 [[ $parts == '1920x1080@30|960x0|1' ]] || fail "extend geometry right beside scaled eDP" "got $parts"
 parts="$(extend_geometry_parts left)"
 [[ $parts == '1920x1080@30|-1920x0|1' ]] || fail "extend geometry left beside scaled eDP" "got $parts"
+# Preferred scale (from settings.sinkScales on reconnect) overrides live virtual scale.
+parts="$(extend_geometry_parts left 2)"
+[[ $parts == '1920x1080@30|-960x0|2' ]] ||
+  fail "extend geometry honors preferred scale 2 on reconnect" "got $parts"
+parts="$(extend_geometry_parts right 1.5)"
+# eDP logical 960; virt logical 1920/1.5=1280; right x=960
+[[ $parts == '1920x1080@30|960x0|1.5' ]] ||
+  fail "extend geometry honors preferred scale 1.5" "got $parts"
 pass "extend_geometry_parts places Extend using logical sizes"
+
+# ========== sinkScales in settings.json (per-device Extend scale) ==========
+export XDG_CONFIG_HOME="$home_dir/.config"
+export XDG_STATE_HOME="$home_dir/.local/state"
+mkdir -p "$config_dir" "$state_dir"
+printf '%s\n' '{"mode":"extend","lastPeerMac":"aa:bb:cc:dd:ee:ff"}' >"$config_dir/settings.json"
+# Legacy peer-prefs.json should migrate into sinkScales then be removed.
+printf '%s\n' '{"AA:BB:CC:DD:EE:11":{"scale":1.5,"brightness":80}}' >"$state_dir/peer-prefs.json"
+
+remember_out="$("$PLUGIN_BIN/miracast-ctl" remember-extend-scale --mac DE:84:03:8D:51:17 --scale 2 2>/dev/null || true)"
+echo "$remember_out" | rg -q '"ok":true' ||
+  fail "remember-extend-scale reports ok" "out=$remember_out"
+echo "$remember_out" | rg -q '"scale":"2"' ||
+  fail "remember-extend-scale echoes saved scale" "out=$remember_out"
+
+python3 - "$config_dir/settings.json" "$state_dir/peer-prefs.json" <<'PY' || fail "sinkScales persistence / legacy migrate"
+import json, os, sys
+settings_path, legacy_path = sys.argv[1], sys.argv[2]
+settings = json.load(open(settings_path))
+scales = settings.get("sinkScales")
+assert isinstance(scales, dict), scales
+assert scales.get("DE:84:03:8D:51:17") == 2, scales
+# Legacy MAC folded in (brightness discarded); file removed.
+assert scales.get("AA:BB:CC:DD:EE:11") == 1.5, scales
+assert not os.path.exists(legacy_path), "peer-prefs.json should be removed after migrate"
+print("ok")
+PY
+
+# Overwrite scale for same device
+"$PLUGIN_BIN/miracast-ctl" remember-extend-scale --mac de:84:03:8d:51:17 --scale 1.6 >/dev/null
+python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["sinkScales"];
+assert s["DE:84:03:8D:51:17"]==1.6, s' "$config_dir/settings.json" ||
+  fail "remember-extend-scale updates sinkScales and normalizes MAC"
+pass "sinkScales persists Extend scale per device in settings.json"
 
 # ========== capture_senders_alive ==========
 # shellcheck source=/dev/null
@@ -570,5 +612,61 @@ assertEqual(
   'inferExtendPosition empty without Miracast output'
 )
 JS
+
+# ========== tame_extend_workspaces / migrate use Hyprland 0.56 Lua dispatch ==========
+extract_fn migrate_workspaces_from_monitor "$test_tmp/migrate.sh"
+extract_fn tame_extend_workspaces "$test_tmp/tame.sh"
+rg -q 'hl.dsp.workspace.move' "$test_tmp/migrate.sh" ||
+  fail "migrate_workspaces_from_monitor uses Lua workspace.move"
+rg -q 'hl.workspace_rule' "$test_tmp/tame.sh" ||
+  fail "tame_extend_workspaces uses hl.workspace_rule"
+rg -q 'special:miracast' "$test_tmp/tame.sh" ||
+  fail "tame_extend_workspaces parks special:miracast on cast output"
+rg -q 'prev_ws' "$test_tmp/tame.sh" ||
+  fail "tame_extend_workspaces restores prior eDP workspace after setup"
+# Streaming health loop must not call tame (cursor-steal regression).
+health_block="$(awk '/saw_play.*-eq 1/,/sleep 1/' "$PLUGIN_BIN/miracast-ctl" || true)"
+echo "$health_block" | rg -q 'tame_extend_workspaces' &&
+  fail "streaming health loop must not call tame_extend_workspaces" \
+    "block=$(echo "$health_block" | head -20)"
+pass "Extend workspace taming uses Hyprland Lua APIs"
+
+# ========== monitor-scale persists Extend scale via remember-extend-scale ==========
+cp "$SCALE_SRC" "$fake_plugin_bin/monitor-scale"
+# Recording ctl that accepts remember-extend-scale
+cat >"$fake_plugin_bin/miracast-ctl" <<'SH'
+#!/bin/bash
+echo "$*" >>"${OMARCHY_TEST_CTL_LOG:-/dev/null}"
+case "${1:-}" in
+  pause-capture|pause_capture) echo '{"ok":true,"paused":0}' ;;
+  ensure-capture|ensure_capture) echo '{"ok":true,"captureHealthy":true}' ;;
+  remember-extend-scale|remember_extend_scale) echo '{"ok":true,"scale":"2"}' ;;
+  *) echo '{"ok":true}' ;;
+esac
+exit 0
+SH
+chmod +x "$fake_plugin_bin/miracast-ctl"
+printf '%s\n' 'hotyeah-8D5117_P2P' >"$state_dir/headless.name"
+printf '%s\n' '{"extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' \
+  >"$config_dir/settings.json"
+printf '%s\n' '[
+  {"name":"eDP-1","focused":true,"width":1920,"height":1080,"scale":2,"refreshRate":60,"x":0,"y":0},
+  {"name":"hotyeah-8D5117_P2P","focused":false,"width":1920,"height":1080,"scale":1,"refreshRate":30,"x":-960,"y":0}
+]' >"$monitors_file"
+: >"$ctl_log"
+: >"$hypr_log"
+HOME="$home_dir" \
+  XDG_STATE_HOME="$home_dir/.local/state" \
+  XDG_CONFIG_HOME="$home_dir/.config" \
+  PATH="$stub_bin:$PATH" \
+  OMARCHY_TEST_MONITORS="$monitors_file" \
+  OMARCHY_TEST_HYPR_LOG="$hypr_log" \
+  OMARCHY_TEST_CTL_LOG="$ctl_log" \
+  OMARCHY_TEST_DEFER_SLEEP=60 \
+  OMARCHY_TEST_ENSURE_SLEEP=0 \
+  bash "$fake_plugin_bin/monitor-scale" hotyeah-8D5117_P2P 2 >/dev/null
+grep -E 'remember-extend-scale|remember_extend_scale' "$ctl_log" >/dev/null ||
+  fail "monitor-scale saves Extend scale via remember-extend-scale" "ctl=$(cat "$ctl_log")"
+pass "monitor-scale persists Extend scale for reconnect"
 
 pass "miracast monitor regression coverage"
