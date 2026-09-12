@@ -711,6 +711,29 @@ awk '/^cmd_stop\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capt
   fail "cmd_stop must pause capture before killing FluxCast / removing headless"
 pass "disconnect paths pause capture before disabling Miracast output"
 
+# Display panel: expand-all default + cast controls under Miracast row.
+rg -q 'onlyExpandFocusedDisplay' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl defaults/status must expose onlyExpandFocusedDisplay"
+rg -q '"onlyExpandFocusedDisplay": False' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "onlyExpandFocusedDisplay default must be false (expand all)"
+rg -q 'expandedMonitors' "$PLUGIN/Panel.qml" ||
+  fail "Panel.qml must track expandedMonitors for multi-expand"
+rg -q 'onlyExpandFocusedDisplay' "$PLUGIN/Panel.qml" ||
+  fail "Panel.qml must honor onlyExpandFocusedDisplay"
+rg -q 'onlyExpandFocusedDisplay' "$PLUGIN/MiracastService.qml" ||
+  fail "MiracastService must surface onlyExpandFocusedDisplay from status"
+rg -q 'CAST MODE' "$PLUGIN/Panel.qml" ||
+  fail "Panel.qml must include CAST MODE controls"
+rg -q 'display\.miracast' "$PLUGIN/Panel.qml" ||
+  fail "cast session controls must be gated on the Miracast display row"
+rg -q 'text: "BRIGHTNESS"' "$PLUGIN/Panel.qml" ||
+  fail "Brightness label must be uppercase BRIGHTNESS"
+rg -q 'text: "SCALE"' "$PLUGIN/Panel.qml" ||
+  fail "Scale label must be uppercase SCALE"
+rg -q 'onlyExpandFocusedDisplay' "$PLUGIN/README.md" ||
+  fail "monitor README must document onlyExpandFocusedDisplay"
+pass "Display panel expand-all default and Miracast-row cast controls are wired"
+
 # Screen lock: pause capture on lock, ensure on unlock (screencopy dies under hyprlock).
 rg -q 'pauseCaptureForLock' "$PLUGIN/MiracastService.qml" ||
   fail "MiracastService must pause capture when the session locks"
