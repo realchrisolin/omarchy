@@ -16,6 +16,7 @@ from `bin/miracast-ctl` on each read.
 | `extendResolution` | `1280x720` | Extend virtual output size (fallback) |
 | `bitrate` | `4M` | Trimmed further on battery / power-saver |
 | `videoEncoder` | `auto` | `auto` → VAAPI / QSV / software |
+| *(env)* `FLUXCAST_WFD_CAPTURE_ENCODE` | `auto` when GPU encoder | `auto`/`vaapi` = wf-recorder DMA-BUF; `pipe` = legacy raw→hwupload |
 | `sinkScales` | `{}` | Per-sink Extend scale, keyed by MAC |
 | `onlyExpandFocusedDisplay` | `false` | `false` = expand all display rows; `true` = accordion (focused only) |
 
@@ -32,6 +33,13 @@ from `bin/miracast-ctl` on each read.
 While Miracast is connected, cast session controls (**CAST MODE**, **EXTEND
 POSITION**, **STREAM MODE**) appear under the Miracast display row next to
 **SCALE**. Scan / firewall / doctor / Stop remain under the **MIRACAST** section.
+
+## Virtual output lifecycle (eDP safety)
+
+Miracast **must not** call `hyprctl output remove` / `monitor,disable` during
+connect or disconnect — those calls have frozen the primary display for
+30–90s. Stop leaves the virtual output in place; the next Extend session
+**reuses** it. Orphan cleanup is never automatic on the hot path.
 
 ## FluxCast patches
 
