@@ -31,28 +31,51 @@ Panel {
   property real wheelAccumulator: 0
 
   // Cursor model shared by keyboard and mouse. Sections:
-  //   "brightness" - single slider row, selectedIndex = -1 sentinel
-  //                  (mirrors Audio's slider rows). Only present if a
-  //                  controllable backlight was detected.
-  //   "scale"      - 6 Button scale presets; treated as a single
-  //                  horizontal row from j/k's perspective. h/l moves
-  //                  between presets, identical to bluetooth's header.
-  //   "monitors"   - vertical display row list for enabling/disabling displays;
-  //                  j/k walks each row.
+  //   "monitors"   - expandable display rows; brightness + scale nest under
+  //                  the expanded row. j/k walks displays; h/l walks scale
+  //                  pills when that display is expanded.
+  //   "monitorBrightness" - brightness slider for one display (selectedIndex
+  //                  = display row index).
+  //   "monitorScale" - scale pills for one display; selectedIndex = pill index,
+  //                  scaleFocusMonitor names the target output.
+  //   "miracastMode" / "miracastPos" / "miracastStream" / "miracast" / "miracastPeers"
+  //   "textsize"   - global shell/GTK/terminal text size (not per-display).
+  readonly property var miracastModeValues: ["mirror", "extend"]
+  readonly property var miracastPosValues: ["left", "right", "above", "below"]
+  readonly property var miracastStreamModeIds: {
+    var out = []
+    var modes = (miracast && miracast.streamModes) ? miracast.streamModes : []
+    for (var i = 0; i < modes.length; i++) {
+      if (modes[i] && modes[i].id) out.push(String(modes[i].id))
+    }
+    return out
+  }
   // Mouse hover on a target updates root state via the components' `hovered`
   // signal so keyboard cursor and pointer share one highlight.
   readonly property var scalePresets: ["1", "1.25", "1.6", "2", "3", "4"]
-  readonly property var scaleValues: {
-    for (var i = 0; i < displays.length; i++) {
-      var display = displays[i]
-      if (display && display.focused)
-        return Model.availableScales(scalePresets, display.width, display.height)
-    }
-    return scalePresets
-  }
-  property string focusSection: "scale"
+  property string focusSection: "monitors"
   property int selectedIndex: 0
   property bool cursorActive: false
+  // Accordion: at most one display shows nested brightness/scale controls.
+  property string expandedMonitor: ""
+  // Which monitor's scale-pill row currently has keyboard focus.
+  property string scaleFocusMonitor: ""
+  // After open, wait for a fresh monitor-state read before expanding — otherwise
+  // we lock onto a stale focusedMonitor (usually eDP) from the last poll.
+  property bool syncExpandToFocusPending: false
+
+  // Resolve this plugin's install dir from Panel.qml so any clone id works
+  // (Omarchy installs clones as <user>.monitor, not a fixed path).
+  readonly property string miracastPluginDir: {
+    var s = String(Qt.resolvedUrl("./"))
+    if (s.indexOf("file://") === 0)
+      s = decodeURIComponent(s.substring(7))
+    while (s.length > 1 && s.charAt(s.length - 1) === "/")
+      s = s.substring(0, s.length - 1)
+    return s
+  }
+  readonly property string pluginBin: miracastPluginDir + "/bin"
+  readonly property string miracastMonitorName: focusedMonitor !== "" ? focusedMonitor : "eDP-1"
 
   // Text size slider — curated macOS-style notches (px). The panel snaps to
   // these stops; the CLI (omarchy-display-text-size) accepts any integer in range.
@@ -72,34 +95,169 @@ Panel {
     reflowSettle.restart()
   }
 
+  // DISPLAYS always hosts per-output brightness/scale, even with one panel.
+  readonly property bool showDisplaysSection: displays.length > 0
+
+  // Mode/position only matter while a session is live (and the virtual
+  // display exists for Extend). Hide them when idle to save panel space.
+  readonly property bool showMiracastSessionControls: !!(miracast && miracast.active)
+
   readonly property var visibleSections: {
     var list = []
-    if (brightnessAvailable) list.push("brightness")
+    if (showDisplaysSection) list.push("monitors")
+    if (showMiracastSessionControls) {
+      list.push("miracastMode")
+      if (miracast && miracast.mode === "extend") list.push("miracastPos")
+      if (miracastStreamModeIds.length > 0) list.push("miracastStream")
+    }
+    list.push("miracast")
+    if (miracast && miracast.peers && miracast.peers.length > 0) list.push("miracastPeers")
     list.push("textsize")
-    list.push("scale")
-    if (displays.length > 1) list.push("monitors")
     return list
   }
 
   function sectionCount(section) {
-    if (section === "brightness") return 0  // only the slider sentinel at -1
-    if (section === "textsize") return 0    // slider sentinel at -1, like brightness
-    if (section === "scale") return scaleValues.length
-    if (section === "monitors") return displays.length
+    if (section === "textsize") return 0    // slider sentinel at -1
+    if (section === "monitorBrightness") return 0
+    if (section === "monitorScale") {
+      var d = displayByName(scaleFocusMonitor)
+      return d ? scaleValuesFor(d).length : 0
+    }
+    if (section === "monitors") return displays ? displays.length : 0
+    if (section === "miracastMode") return miracastModeValues.length
+    if (section === "miracastPos") return miracastPosValues.length
+    if (section === "miracastStream") return miracastStreamModeIds.length
+    if (section === "miracast") return 0    // action row sentinel at -1
+    if (section === "miracastPeers")
+      return (miracast && miracast.peers) ? miracast.peers.length : 0
     return 0
   }
 
   function sectionIsSingleRow(section) {
-    // brightness and text size are lone sliders; scale presets sit horizontally.
-    return section === "brightness" || section === "textsize" || section === "scale"
+    // text size / nested brightness are lone sliders; scale/mode/pos sit horizontally;
+    // miracast actions are one control row.
+    return section === "textsize" || section === "monitorBrightness" || section === "monitorScale"
+      || section === "miracast" || section === "miracastMode" || section === "miracastPos"
+      || section === "miracastStream"
   }
 
   function sectionFirstIndex(section) {
-    if (section === "brightness" || section === "textsize") return -1
+    if (section === "textsize" || section === "miracast" || section === "monitorBrightness") return -1
+    if (section === "miracastMode") return Math.max(0, miracastModeValues.indexOf(miracast.mode))
+    if (section === "miracastPos") return Math.max(0, miracastPosValues.indexOf(miracast.extendPosition))
+    if (section === "miracastStream") return Math.max(0, miracastStreamModeIds.indexOf(miracast.streamMode))
+    if (section === "monitorScale") return Math.max(0, activeScaleIndexFor(displayByName(scaleFocusMonitor)))
     return 0
   }
 
+  function displayByName(name) {
+    var target = String(name || "")
+    for (var i = 0; i < displays.length; i++) {
+      if (displays[i] && displays[i].name === target) return displays[i]
+    }
+    return null
+  }
+
+  function scaleValuesFor(display) {
+    if (!display) return scalePresets
+    return Model.availableScales(scalePresets, display.width, display.height)
+  }
+
+  function displayBrightness(display) {
+    if (!display) return root.brightnessPercent
+    if (display.brightness !== undefined && display.brightness !== null)
+      return Model.clampBrightness(display.brightness)
+    if (display.name === root.focusedMonitor) return root.brightnessPercent
+    return 50
+  }
+
+  function isExpanded(name) {
+    return root.expandedMonitor !== "" && root.expandedMonitor === String(name || "")
+  }
+
+  function toggleExpanded(name) {
+    var target = String(name || "")
+    if (target === "") return
+    root.expandedMonitor = root.expandedMonitor === target ? "" : target
+  }
+
+  function selectFocusedDisplayRow() {
+    if (!showDisplaysSection) return
+    root.focusSection = "monitors"
+    root.selectedIndex = 0
+    for (var i = 0; i < displays.length; i++) {
+      if (displays[i] && displays[i].focused) {
+        root.selectedIndex = i
+        break
+      }
+    }
+  }
+
+  // preferFocus: expand focused when nothing usable is expanded.
+  // forceFocus: always expand the currently focused output (open / focus change).
+  function ensureExpandedMonitor(preferFocus, forceFocus) {
+    if (!displays || displays.length === 0) {
+      root.expandedMonitor = ""
+      return
+    }
+    if (forceFocus) {
+      var forced = root.focusedMonitor
+      if (forced !== "" && displayByName(forced)) {
+        root.expandedMonitor = forced
+        return
+      }
+      for (var k = 0; k < displays.length; k++) {
+        if (displays[k] && displays[k].focused) {
+          root.expandedMonitor = displays[k].name
+          return
+        }
+      }
+    }
+    if (root.expandedMonitor !== "") {
+      for (var i = 0; i < displays.length; i++) {
+        if (displays[i] && displays[i].name === root.expandedMonitor) return
+      }
+      // Previously expanded output disappeared — fall through and pick again.
+    } else if (!preferFocus) {
+      // User collapsed the accordion; don't force it back open on refresh.
+      return
+    }
+    // Auto-expand the focused output (fallback: first enabled display).
+    var focus = root.focusedMonitor
+    if (focus !== "" && displayByName(focus)) {
+      root.expandedMonitor = focus
+      return
+    }
+    for (var j = 0; j < displays.length; j++) {
+      if (displays[j] && displays[j].focused) {
+        root.expandedMonitor = displays[j].name
+        return
+      }
+    }
+    for (var n = 0; n < displays.length; n++) {
+      if (displays[n] && displays[n].enabled) {
+        root.expandedMonitor = displays[n].name
+        return
+      }
+    }
+    root.expandedMonitor = displays[0] ? displays[0].name : ""
+  }
+
   function moveCursor(delta) {
+    // Nested brightness/scale sit under a display row — vertical nav returns
+    // to that display header first, then continues through sections.
+    if (focusSection === "monitorBrightness") {
+      focusSection = "monitors"
+      if (selectedIndex < 0) selectedIndex = 0
+    } else if (focusSection === "monitorScale") {
+      var idx = 0
+      for (var i = 0; i < displays.length; i++) {
+        if (displays[i] && displays[i].name === scaleFocusMonitor) { idx = i; break }
+      }
+      focusSection = "monitors"
+      selectedIndex = idx
+    }
+
     var sections = visibleSections
     if (!sections || sections.length === 0) return
     var sIdx = sections.indexOf(focusSection)
@@ -129,38 +287,115 @@ Panel {
     }
   }
 
-  // h/l: in scale section, walks the preset row; everywhere else, no-op
-  // because adjustBrightness handles horizontal motion on the brightness
-  // slider.
+  // h/l: walks scale / mode / position pills; brightness uses adjustBrightness.
   function moveCursorH(delta) {
-    if (focusSection !== "scale") return
-    var next = selectedIndex + delta
-    if (next < 0) next = 0
-    if (next > scaleValues.length - 1) next = scaleValues.length - 1
-    selectedIndex = next
+    if (focusSection === "monitorScale") {
+      var scales = scaleValuesFor(displayByName(scaleFocusMonitor))
+      var next = selectedIndex + delta
+      if (next < 0) next = 0
+      if (next > scales.length - 1) next = scales.length - 1
+      selectedIndex = next
+      return
+    }
+    if (focusSection === "monitors" && selectedIndex >= 0 && selectedIndex < displays.length) {
+      var row = displays[selectedIndex]
+      if (row && isExpanded(row.name)) {
+        root.scaleFocusMonitor = row.name
+        root.focusSection = "monitorScale"
+        root.selectedIndex = Math.max(0, activeScaleIndexFor(row))
+        moveCursorH(delta)
+      }
+      return
+    }
+    if (focusSection === "miracastMode") {
+      var modeNext = selectedIndex + delta
+      if (modeNext < 0) modeNext = 0
+      if (modeNext > miracastModeValues.length - 1) modeNext = miracastModeValues.length - 1
+      selectedIndex = modeNext
+      return
+    }
+    if (focusSection === "miracastPos") {
+      var posNext = selectedIndex + delta
+      if (posNext < 0) posNext = 0
+      if (posNext > miracastPosValues.length - 1) posNext = miracastPosValues.length - 1
+      selectedIndex = posNext
+      return
+    }
+    if (focusSection === "miracastStream") {
+      var streamNext = selectedIndex + delta
+      if (streamNext < 0) streamNext = 0
+      if (streamNext > miracastStreamModeIds.length - 1) streamNext = miracastStreamModeIds.length - 1
+      selectedIndex = streamNext
+    }
   }
 
   function adjustBrightness(delta) {
-    if (focusSection !== "brightness") return
-    if (!brightnessAvailable) return
-    setBrightness(root.brightnessPercent + delta)
+    var name = ""
+    if (focusSection === "monitorBrightness" && selectedIndex >= 0 && selectedIndex < displays.length)
+      name = displays[selectedIndex] ? displays[selectedIndex].name : ""
+    else if (focusSection === "monitors" && selectedIndex >= 0 && selectedIndex < displays.length) {
+      var row = displays[selectedIndex]
+      if (row && isExpanded(row.name) && row.brightnessAvailable) name = row.name
+    }
+    if (name === "") return
+    var display = displayByName(name)
+    if (!display || !display.brightnessAvailable) return
+    setBrightness(name, displayBrightness(display) + delta)
   }
 
   function activateCursor() {
-    if (focusSection === "scale" && selectedIndex >= 0 && selectedIndex < scaleValues.length) {
-      setScale(scaleValues[selectedIndex])
+    if (focusSection === "monitorScale") {
+      var scales = scaleValuesFor(displayByName(scaleFocusMonitor))
+      if (selectedIndex >= 0 && selectedIndex < scales.length)
+        setScale(scaleFocusMonitor, scales[selectedIndex])
+      return
+    }
+    if (focusSection === "miracastMode" && selectedIndex >= 0 && selectedIndex < miracastModeValues.length) {
+      miracast.setMode(miracastModeValues[selectedIndex])
+      return
+    }
+    if (focusSection === "miracastPos" && selectedIndex >= 0 && selectedIndex < miracastPosValues.length) {
+      miracast.setExtendPosition(miracastPosValues[selectedIndex])
+      return
+    }
+    if (focusSection === "miracastStream" && selectedIndex >= 0 && selectedIndex < miracastStreamModeIds.length) {
+      miracast.setStreamMode(miracastStreamModeIds[selectedIndex])
       return
     }
     if (focusSection === "monitors" && selectedIndex >= 0 && selectedIndex < displays.length) {
       var d = displays[selectedIndex]
-      if (d) toggleDisplay(d.name, d.enabled)
+      if (d) toggleExpanded(d.name)
+      return
     }
-    // brightness: no separate action; the slider value is the action.
+    if (focusSection === "miracast") {
+      if (miracast.active) miracast.stopCast()
+      else miracast.scanPeers()
+      return
+    }
+    if (focusSection === "miracastPeers" && selectedIndex >= 0 && selectedIndex < miracast.peers.length) {
+      var peer = miracast.peers[selectedIndex]
+      if (peer) miracast.startCast(peer.mac)
+    }
   }
 
   function clampCursor() {
     var sections = visibleSections
     if (!sections || !sections.length) return
+    // Nested monitor controls aren't top-level sections — keep them as-is.
+    if (focusSection === "monitorBrightness" || focusSection === "monitorScale") {
+      if (focusSection === "monitorBrightness") {
+        if (selectedIndex < 0 || selectedIndex >= displays.length) selectedIndex = 0
+      } else {
+        var count = sectionCount("monitorScale")
+        if (count <= 0 || scaleFocusMonitor === "" || !displayByName(scaleFocusMonitor)) {
+          focusSection = "monitors"
+          selectedIndex = 0
+        } else if (selectedIndex < 0 || selectedIndex >= count) {
+          selectedIndex = sectionFirstIndex("monitorScale")
+        }
+      }
+      return
+    }
     if (sections.indexOf(focusSection) < 0) {
       focusSection = sections[0]
       selectedIndex = sectionFirstIndex(focusSection)
@@ -168,9 +403,8 @@ Panel {
     }
     var count = sectionCount(focusSection)
     if (sectionIsSingleRow(focusSection)) {
-      // brightness/text size use the -1 sentinel; scale clamps into the presets.
-      if (focusSection === "brightness" || focusSection === "textsize") selectedIndex = -1
-      else if (selectedIndex < 0 || selectedIndex >= count) selectedIndex = 0
+      if (focusSection === "textsize" || focusSection === "miracast") selectedIndex = -1
+      else if (selectedIndex < 0 || selectedIndex >= count) selectedIndex = sectionFirstIndex(focusSection)
       return
     }
     if (count === 0) {
@@ -203,7 +437,7 @@ Panel {
 
   function brightnessIpc(percent) {
     var value = Number(percent)
-    root.setBrightness(value)
+    root.setBrightness(root.focusedMonitor, value)
     return "got " + root.pendingBrightnessPercent
   }
 
@@ -233,10 +467,17 @@ Panel {
     if (!stateProc.running) stateProc.running = true
   }
 
-  function setBrightness(value) {
+  // Pending brightness target monitor for debounced / queued writes.
+  property string brightnessTargetMonitor: ""
+
+  function setBrightness(monitorName, value) {
+    var name = String(monitorName || root.focusedMonitor || "")
     var percent = Model.clampBrightness(value)
-    root.brightnessPercent = percent
+    root.brightnessTargetMonitor = name
     root.pendingBrightnessPercent = percent
+    if (name === root.focusedMonitor || name === "")
+      root.brightnessPercent = percent
+    updateDisplayBrightness(name, percent)
 
     if (setBrightnessProc.running) {
       root.brightnessSetQueued = true
@@ -244,13 +485,47 @@ Panel {
     }
 
     root.brightnessSetQueued = false
-    setBrightnessProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", root.focusedMonitor, percent + "%"]
+    setBrightnessProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", name, percent + "%"]
     setBrightnessProc.running = true
   }
 
-  function previewBrightness(value) {
-    root.brightnessPercent = Model.clampBrightness(value)
+  function previewBrightness(monitorName, value) {
+    var name = String(monitorName || root.focusedMonitor || "")
+    var percent = Model.clampBrightness(value)
+    root.brightnessTargetMonitor = name
+    if (name === root.focusedMonitor || name === "")
+      root.brightnessPercent = percent
+    updateDisplayBrightness(name, percent)
     brightnessDebounce.restart()
+  }
+
+  function updateDisplayBrightness(name, percent) {
+    var target = String(name || "")
+    if (target === "") return
+    var next = []
+    for (var i = 0; i < displays.length; i++) {
+      var src = displays[i]
+      if (!src) continue
+      var d = {
+        name: src.name,
+        enabled: src.enabled,
+        focused: src.focused,
+        width: src.width,
+        height: src.height,
+        scale: src.scale,
+        refreshRate: src.refreshRate,
+        x: src.x,
+        y: src.y,
+        brightness: src.brightness,
+        brightnessAvailable: src.brightnessAvailable
+      }
+      if (d.name === target) {
+        d.brightness = Model.clampBrightness(percent)
+        d.brightnessAvailable = true
+      }
+      next.push(d)
+    }
+    root.displays = next
   }
 
   function showBrightnessOsd(percent) {
@@ -265,22 +540,15 @@ Panel {
     return Model.normalizeScale(scale)
   }
 
-  function activeScaleIndex() {
-    for (var i = 0; i < displays.length; i++) {
-      var display = displays[i]
-      if (display && display.focused)
-        return Model.matchingScaleIndex(scaleValues, monitorScale, display.width, display.height)
-    }
-    return -1
+  function activeScaleIndexFor(display) {
+    if (!display) return -1
+    var current = display.scale !== undefined ? display.scale : (display.focused ? monitorScale : "")
+    return Model.matchingScaleIndex(scaleValuesFor(display), current, display.width, display.height)
   }
 
-  function effectiveScale(scale) {
-    for (var i = 0; i < displays.length; i++) {
-      var display = displays[i]
-      if (display && display.focused)
-        return Model.cleanScale(scale, display.width, display.height)
-    }
-    return normalizeScale(scale)
+  function effectiveScaleFor(display, scale) {
+    if (!display) return normalizeScale(scale)
+    return Model.cleanScale(scale, display.width, display.height)
   }
 
   // Playful mood-name for a given brightness percent. Bands intentionally
@@ -304,9 +572,41 @@ Panel {
     if (!actionProc.running) actionProc.running = true
   }
 
-  function setScale(scale) {
-    actionProc.command = ["bash", "-c", "omarchy-hyprland-monitor-scaling " + scale]
+  function setScale(monitorName, scale) {
+    var name = String(monitorName || root.focusedMonitor || "")
+    if (name === "") return
+    actionProc.command = [root.pluginBin + "/monitor-scale", name, String(scale)]
     if (!actionProc.running) actionProc.running = true
+    // Optimistic UI update so the active pill changes immediately.
+    updateDisplayScale(name, scale)
+  }
+
+  function updateDisplayScale(name, scale) {
+    var target = String(name || "")
+    if (target === "") return
+    var next = []
+    for (var i = 0; i < displays.length; i++) {
+      var src = displays[i]
+      if (!src) continue
+      var d = {
+        name: src.name,
+        enabled: src.enabled,
+        focused: src.focused,
+        width: src.width,
+        height: src.height,
+        scale: src.scale,
+        refreshRate: src.refreshRate,
+        x: src.x,
+        y: src.y,
+        brightness: src.brightness,
+        brightnessAvailable: src.brightnessAvailable,
+        miracast: src.miracast
+      }
+      if (d.name === target) d.scale = Number(scale)
+      next.push(d)
+    }
+    root.displays = next
+    if (target === root.focusedMonitor) root.monitorScale = root.normalizeScale(scale)
   }
 
   // ---- Text size (shell base font + GTK text-scaling, via one CLI) ----
@@ -349,6 +649,18 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  MiracastService {
+    id: miracast
+    pluginDir: root.miracastPluginDir
+    monitorName: root.miracastMonitorName
+  }
+
+  Connections {
+    target: miracast
+    function onPeersChanged() { root.clampCursor() }
+    function onPhaseChanged() { root.clampCursor() }
+  }
+
   Component.onCompleted: refresh()
 
   // KeyboardPanel primes focus at open-time, so SUPER-bound IPC summons land
@@ -356,21 +668,40 @@ Panel {
   // the cursor until hover or the first navigation key.
   onOpenedChanged: {
     if (opened) {
+      // Defer accordion expand until monitor-state returns fresh focus.
+      root.syncExpandToFocusPending = true
       refresh()
-      if (brightnessAvailable) {
-        focusSection = "brightness"
-        selectedIndex = -1
-      } else {
-        focusSection = "scale"
+      miracast.refresh()
+      if (showDisplaysSection) {
+        focusSection = "monitors"
         selectedIndex = 0
+      } else if (showMiracastSessionControls) {
+        focusSection = "miracastMode"
+        selectedIndex = Math.max(0, miracastModeValues.indexOf(miracast.mode))
+      } else {
+        focusSection = "miracast"
+        selectedIndex = -1
       }
       cursorActive = false
+    } else {
+      root.syncExpandToFocusPending = false
     }
   }
 
   onBrightnessAvailableChanged: clampCursor()
-  onDisplaysChanged: clampCursor()
-  onScaleValuesChanged: clampCursor()
+  onDisplaysChanged: {
+    if (!root.syncExpandToFocusPending)
+      ensureExpandedMonitor(false)
+    clampCursor()
+  }
+  onFocusedMonitorChanged: {
+    // While the panel is open, keep the accordion on the focused output
+    // (e.g. opened from the Miracast display after state catches up).
+    if (root.opened)
+      ensureExpandedMonitor(true, true)
+    else if (root.expandedMonitor === "" || !displayByName(root.expandedMonitor))
+      ensureExpandedMonitor(true)
+  }
   onVisibleSectionsChanged: clampCursor()
 
   // Only poll while the panel is open; the bar glyph tracks monitor count via
@@ -385,7 +716,7 @@ Panel {
 
   Process {
     id: stateProc
-    command: ["omarchy-monitor-state"]
+    command: [root.pluginBin + "/monitor-state"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -400,6 +731,11 @@ Panel {
         root.focusedMonitor = String(lines[5] || "").trim()
         root.monitorScale = root.normalizeScale(String(lines[6] || "").trim())
         root.updateDisplays(String(lines[7] || "[]").trim())
+        if (root.opened && root.syncExpandToFocusPending) {
+          root.syncExpandToFocusPending = false
+          root.ensureExpandedMonitor(true, true)
+          root.selectFocusedDisplayRow()
+        }
       }
     }
   }
@@ -408,23 +744,18 @@ Panel {
     id: brightnessDebounce
     interval: 180
     repeat: false
-    onTriggered: root.setBrightness(root.brightnessPercent)
+    onTriggered: root.setBrightness(root.brightnessTargetMonitor || root.focusedMonitor, root.pendingBrightnessPercent)
   }
 
   Process {
     id: setBrightnessProc
     stdout: StdioCollector { waitForEnd: true }
-    // Do NOT call refresh() after a brightness set completes. The local
-    // brightnessPercent we just wrote is authoritative; re-reading via
-    // `omarchy-brightness-display` races the hardware/driver and can
-    // return an empty string, which the parser then coerces to 0 —
-    // visible as a "bounce to zero" after h/l keypresses. External
-    // brightness changes are still picked up by the 5s periodic refresh,
-    // the open-time refresh, and Component.onCompleted.
+    // Do NOT call refresh() after a brightness set completes — local state is
+    // authoritative. External changes still arrive via the 5s refresh.
     onRunningChanged: {
       if (running) return
       if (root.brightnessSetQueued) {
-        root.setBrightness(root.pendingBrightnessPercent)
+        root.setBrightness(root.brightnessTargetMonitor || root.focusedMonitor, root.pendingBrightnessPercent)
       }
     }
   }
@@ -469,14 +800,27 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: Quickshell.screens.length > 1 ? "󰍺" : "󰍹"
+    // Match stock Display: always use the normal bar foreground. Miracast
+    // state is shown only via the small overlay, never by greying the icon.
+    text: ""
+    active: false
+    useActiveColor: false
+    iconComponent: Component {
+      MiracastBarIcon {
+        iconSize: Style.bar.iconFont
+        color: button.foreground
+        phase: miracast.phase
+        multiDisplay: Quickshell.screens.length > 1 || root.displays.length > 1
+        fontFamily: button.fontFamily
+      }
+    }
     onPressed: function(b) { root.toggle() }
     onWheelMoved: function(delta) {
       if (!root.brightnessAvailable) return
       var wheel = Util.wheelSteps(root.wheelAccumulator, delta)
       root.wheelAccumulator = wheel.remainder
       if (wheel.steps === 0) return
-      root.setBrightness(root.brightnessPercent + wheel.steps * 5)
+      root.setBrightness(root.focusedMonitor, root.brightnessPercent + wheel.steps * 5)
       root.showBrightnessOsd(root.brightnessPercent)
     }
   }
@@ -498,14 +842,26 @@ Panel {
         if (!root.cursorActive) { root.cursorActive = true; return }
         if (dy !== 0) root.moveCursor(dy)
         else if (dx !== 0) {
-          if (root.focusSection === "brightness") root.adjustBrightness(dx * 5)
+          if (root.focusSection === "monitorBrightness") root.adjustBrightness(dx * 5)
           else if (root.focusSection === "textsize") root.adjustTextSize(dx)
-          else if (root.focusSection === "scale") root.moveCursorH(dx)
+          else if (root.focusSection === "monitors" || root.focusSection === "monitorScale"
+                   || root.focusSection === "miracastMode" || root.focusSection === "miracastPos"
+                   || root.focusSection === "miracastStream")
+            root.moveCursorH(dx)
         }
       }
       onActivateRequested: if (root.cursorActive) root.activateCursor()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTextKey: function(t) {
+        if (t === "s" || t === "S") miracast.scanPeers()
+        else if (t === "f" || t === "F") miracast.openFirewall()
+        else if (t === "d" || t === "D") miracast.runDoctor()
+        else if (t === "c" || t === "C") miracast.startCast("")
+        else if (t === "x" || t === "X") miracast.stopCast()
+        else if (t === "m" || t === "M") miracast.setMode("mirror")
+        else if (t === "e" || t === "E") miracast.setMode("extend")
+      }
 
       ScrollView {
         id: scrollArea
@@ -529,13 +885,15 @@ Panel {
             width: parent.width
             implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight)
 
-            Text {
+            MiracastBarIcon {
               id: heroIcon
-              textFormat: Text.PlainText
-              text: root.displays.length > 1 ? "󰍺" : "󰍹"
+              iconSize: Style.font.display
+              width: iconSize
+              height: iconSize
               color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.display
+              phase: miracast.phase
+              multiDisplay: root.displays.length > 1
+              fontFamily: root.bar.fontFamily
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
             }
@@ -549,7 +907,10 @@ Panel {
               spacing: Style.space(2)
 
               Text {
-                text: "Display"
+                textFormat: Text.PlainText
+                text: miracast.streaming && miracast.connectedLabel !== ""
+                      ? miracast.connectedLabel
+                      : "Display"
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.title
@@ -562,8 +923,11 @@ Panel {
                 id: heroLabel
                 textFormat: Text.PlainText
                 text: {
+                  var summary = Model.miracastConnectionSummary(
+                    miracast.phase, miracast.lastPeerName, miracast.lastPeerMac, miracast.mode)
+                  if (summary !== "") return summary.toUpperCase()
                   if (root.brightnessAvailable) {
-                    return root.brightnessName(brightnessSlider.dragging ? brightnessSlider.liveValue : root.brightnessPercent).toUpperCase()
+                    return root.brightnessName(root.brightnessPercent).toUpperCase()
                   }
                   return "FIXED BRIGHTNESS"
                 }
@@ -578,24 +942,53 @@ Panel {
             }
           }
 
-          // ---------- Brightness ----------
+          // ---------- Displays (top) ----------
           PanelSeparator {
-            visible: root.brightnessAvailable
+            visible: root.showDisplaysSection
             foreground: root.bar.foreground
           }
 
           Column {
-            visible: root.brightnessAvailable
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(10)
+            visible: root.showDisplaysSection
+
+            PanelSectionHeader {
+              text: "DISPLAYS"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Repeater {
+              model: root.displays
+
+              MonitorRow {
+                required property var modelData
+                required property int index
+
+                width: panelColumn.width
+                display: modelData
+                rowIndex: index
+              }
+            }
+          }
+
+          // ---------- Miracast / Wi-Fi Display ----------
+          PanelSeparator {
+            foreground: root.bar.foreground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
 
             Item {
               width: parent.width
-              implicitHeight: Math.max(brightnessHeader.implicitHeight, brightnessPercent.implicitHeight)
+              implicitHeight: Math.max(miracastHeader.implicitHeight, miracastPhase.implicitHeight)
 
               PanelSectionHeader {
-                id: brightnessHeader
-                text: "BRIGHTNESS"
+                id: miracastHeader
+                text: "MIRACAST"
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 anchors.left: parent.left
@@ -603,10 +996,9 @@ Panel {
               }
 
               Text {
-                id: brightnessPercent
-                textFormat: Text.PlainText
-                text: Math.round(brightnessSlider.dragging ? brightnessSlider.liveValue : root.brightnessPercent) + "%"
-                color: Qt.darker(root.bar.foreground, 1.4)
+                id: miracastPhase
+                text: Model.miracastPhaseLabel(miracast.phase).toUpperCase()
+                color: miracast.active ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -616,44 +1008,253 @@ Panel {
               }
             }
 
-            CursorSurface {
-              id: brightnessRow
+            Text {
+              visible: miracast.connectedLabel !== "" || miracast.active
               width: parent.width
-              height: brightnessSlider.implicitHeight + Style.spacing.controlGap
-              hasCursor: root.cursorActive && root.focusSection === "brightness" && root.selectedIndex === -1
-              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(brightnessRow)
+              text: {
+                if (miracast.streaming)
+                  return "Connected to " + (miracast.connectedLabel || "Miracast sink")
+                    + " · " + miracast.modeLabel
+                if (miracast.connecting)
+                  return "Connecting to " + (miracast.connectedLabel || "Miracast sink") + "…"
+                if (miracast.connectedLabel !== "")
+                  return "Last device: " + miracast.connectedLabel
+                return ""
+              }
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              // While connected, the line above is enough — don't also show
+              // idle/doctor hints like "Ready to cast".
+              readonly property string detail: {
+                if (miracast.lastError !== "" && miracast.actionStatus === "")
+                  return miracast.lastError
+                if (miracast.actionStatus !== "") {
+                  if (miracast.active && String(miracast.actionStatus).indexOf("Ready") === 0)
+                    return ""
+                  return miracast.actionStatus
+                }
+                if (miracast.active)
+                  return ""
+                return miracast.statusText
+              }
+              visible: detail !== ""
+              width: parent.width
+              text: detail
+              color: miracast.lastError !== "" && miracast.actionStatus === ""
+                     ? (root.bar.urgent || root.bar.foreground)
+                     : Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Column {
+              visible: root.showMiracastSessionControls
+              width: parent.width
+              spacing: Style.space(8)
+
+              PanelSectionHeader {
+                text: "CAST MODE"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+              }
+
+              Grid {
+                id: miracastModeRow
+                width: parent.width
+                columns: root.miracastModeValues.length
+                spacing: Style.spacing.xs
+                readonly property real cellWidth: root.miracastModeValues.length > 0
+                  ? (width - spacing * (columns - 1)) / columns
+                  : 0
+
+                Repeater {
+                  model: root.miracastModeValues
+                  MiracastModePill {
+                    required property string modelData
+                    required property int index
+                    modeValue: modelData
+                    modeIndex: index
+                    width: miracastModeRow.cellWidth
+                  }
+                }
+              }
+
+              Column {
+                visible: miracast.mode === "extend"
+                width: parent.width
+                spacing: Style.space(8)
+
+                PanelSectionHeader {
+                  text: "EXTEND POSITION"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                }
+
+                Text {
+                  visible: miracast.positionWarning !== ""
+                  width: parent.width
+                  text: miracast.positionWarning
+                  color: root.bar.urgent || root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+
+                  PanelToolTip {
+                    visible: miracast.positionWarning !== ""
+                    delay: 0
+                    text: miracast.positionWarning
+                  }
+                }
+
+                Grid {
+                  id: miracastPosRow
+                  width: parent.width
+                  columns: root.miracastPosValues.length
+                  spacing: Style.spacing.xs
+                  readonly property real cellWidth: root.miracastPosValues.length > 0
+                    ? (width - spacing * (columns - 1)) / columns
+                    : 0
+
+                  Repeater {
+                    model: root.miracastPosValues
+                    MiracastPosPill {
+                      required property string modelData
+                      required property int index
+                      posValue: modelData
+                      posIndex: index
+                      width: miracastPosRow.cellWidth
+                    }
+                  }
+                }
+              }
+
+              Column {
+                visible: root.miracastStreamModeIds.length > 0
+                width: parent.width
+                spacing: Style.space(8)
+
+                PanelSectionHeader {
+                  text: "STREAM MODE"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                }
+
+                Grid {
+                  id: miracastStreamRow
+                  width: parent.width
+                  columns: Math.min(root.miracastStreamModeIds.length, 4)
+                  spacing: Style.spacing.xs
+                  readonly property real cellWidth: columns > 0
+                    ? (width - spacing * (columns - 1)) / columns
+                    : 0
+
+                  Repeater {
+                    model: root.miracastStreamModeIds
+                    MiracastStreamModePill {
+                      required property string modelData
+                      required property int index
+                      modeId: modelData
+                      modeIndex: index
+                      width: miracastStreamRow.cellWidth
+                    }
+                  }
+                }
+              }
+            }
+
+            CursorSurface {
+              id: miracastActionsRow
+              width: parent.width
+              implicitHeight: miracastActions.implicitHeight + Style.spacing.controlGap
+              hasCursor: root.cursorActive && root.focusSection === "miracast" && root.selectedIndex === -1
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(miracastActionsRow)
               foreground: root.bar.foreground
               outline: true
 
-              PanelSlider {
-                id: brightnessSlider
-                bar: root.bar
-                anchors.fill: parent
-                anchors.leftMargin: Style.space(6)
-                anchors.rightMargin: Style.space(6)
-                minimum: 1
-                maximum: 100
-                step: 1
-                value: root.brightnessPercent
-                integer: true
-                onMoved: function(v) { root.previewBrightness(v) }
-                onReleased: function(v) {
-                  brightnessDebounce.stop()
-                  root.setBrightness(v)
+              Row {
+                id: miracastActions
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(8)
+                anchors.rightMargin: Style.space(8)
+                spacing: Style.space(8)
+
+                PanelActionButton {
+                  iconText: "󰍉"
+                  tooltipText: "Scan sinks (S)"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  enabled: !miracast.busy
+                  onClicked: miracast.scanPeers()
+                }
+                PanelActionButton {
+                  iconText: "󰈀"
+                  tooltipText: "Open firewall (F)"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  enabled: !miracast.busy
+                  onClicked: miracast.openFirewall()
+                }
+                PanelActionButton {
+                  iconText: "󰒓"
+                  tooltipText: "Doctor (D)"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  enabled: !miracast.busy
+                  onClicked: miracast.runDoctor()
+                }
+                Item { width: Style.space(8); height: 1 }
+                PanelActionButton {
+                  iconText: miracast.active ? "󰓛" : "󰑐"
+                  tooltipText: miracast.active
+                    ? "Stop (X)"
+                    : ("Reconnect to last device"
+                       + (miracast.connectedLabel !== ""
+                          ? " (" + miracast.connectedLabel + ")"
+                          : "")
+                       + " (C)")
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  enabled: !miracast.busy
+                  onClicked: miracast.active ? miracast.stopCast() : miracast.startCast("")
                 }
               }
 
               HoverHandler {
                 onHoveredChanged: if (hovered && !root.reflowingText) {
                   root.cursorActive = true
-                  root.focusSection = "brightness"
+                  root.focusSection = "miracast"
                   root.selectedIndex = -1
+                }
+              }
+            }
+
+            Column {
+              visible: miracast.peers.length > 0
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: miracast.peers
+                MiracastPeerRow {
+                  required property var modelData
+                  required property int index
+                  width: panelColumn.width
+                  peer: modelData
+                  rowIndex: index
                 }
               }
             }
           }
 
-          // ---------- Text size ----------
+          // ---------- Text size (global) ----------
           PanelSeparator {
             foreground: root.bar.foreground
           }
@@ -725,102 +1326,6 @@ Panel {
             }
           }
 
-          // ---------- Scale ----------
-          PanelSeparator {
-            foreground: root.bar.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(10)
-
-            Item {
-              width: parent.width
-              implicitHeight: Math.max(scaleHeader.implicitHeight, scaleMonitor.implicitHeight)
-
-              PanelSectionHeader {
-                id: scaleHeader
-                text: "SCALE"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              // Name the monitor SCALE targets, since it only applies to the
-              // focused one.
-              Text {
-                id: scaleMonitor
-                textFormat: Text.PlainText
-                text: root.focusedMonitor
-                // Only worth naming when more than one display is in play.
-                visible: root.focusedMonitor !== "" && root.enabledDisplayCount > 1
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-              }
-            }
-
-            Grid {
-              id: scaleRow
-              width: parent.width
-              columns: root.scaleValues.length
-              spacing: Style.spacing.xs
-
-              readonly property real cellWidth: root.scaleValues.length > 0
-                ? (width - spacing * (columns - 1)) / columns
-                : 0
-
-              Repeater {
-                model: root.scaleValues
-
-                ScalePill {
-                  required property string modelData
-                  required property int index
-
-                  scaleValue: modelData
-                  scaleIndex: index
-                  width: scaleRow.cellWidth
-                }
-              }
-            }
-          }
-
-          // ---------- Monitors ----------
-          PanelSeparator {
-            visible: root.displays.length > 1
-            foreground: root.bar.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(10)
-            visible: root.displays.length > 1
-
-            PanelSectionHeader {
-              text: "DISPLAYS"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Repeater {
-              model: root.displays
-
-              MonitorRow {
-                required property var modelData
-                required property int index
-
-                width: panelColumn.width
-                display: modelData
-                rowIndex: index
-              }
-            }
-          }
-
           Item {
             width: parent.width
             height: Style.space(4)
@@ -834,8 +1339,9 @@ Panel {
     id: pill
     required property string scaleValue
     required property int scaleIndex
+    required property var display
 
-    text: root.effectiveScale(scaleValue) + "x"
+    text: root.effectiveScaleFor(display, scaleValue) + "x"
     fontSize: Style.font.caption
     foreground: root.bar.foreground
     fontFamily: root.bar.fontFamily
@@ -843,37 +1349,342 @@ Panel {
     verticalPadding: Style.spacing.controlPaddingY
     bordered: true
 
-    active: root.activeScaleIndex() === scaleIndex
-    hasCursor: root.cursorActive && root.focusSection === "scale" && root.selectedIndex === scaleIndex
+    active: root.activeScaleIndexFor(display) === scaleIndex
+    hasCursor: root.cursorActive
+      && root.focusSection === "monitorScale"
+      && root.scaleFocusMonitor === (display ? display.name : "")
+      && root.selectedIndex === scaleIndex
 
-    onClicked: root.setScale(scaleValue)
+    onClicked: root.setScale(display ? display.name : "", scaleValue)
     onHovered: function(isHovered) {
-      if (!isHovered || root.reflowingText) return
+      if (!isHovered || root.reflowingText || !display) return
       root.cursorActive = true
-      root.focusSection = "scale"
+      root.focusSection = "monitorScale"
+      root.scaleFocusMonitor = display.name
       root.selectedIndex = pill.scaleIndex
     }
   }
 
-  component MonitorRow: CursorSurface {
+  component MiracastModePill: Button {
+    id: modePill
+    required property string modeValue
+    required property int modeIndex
+
+    text: modeValue === "extend" ? "Extend" : "Mirror"
+    fontSize: Style.font.caption
+    foreground: root.bar.foreground
+    fontFamily: root.bar.fontFamily
+    horizontalPadding: Style.spacing.sm
+    verticalPadding: Style.spacing.controlPaddingY
+    bordered: true
+
+    active: miracast.mode === modeValue
+    hasCursor: root.cursorActive && root.focusSection === "miracastMode" && root.selectedIndex === modeIndex
+    // Allow selecting a mode anytime; applying to a live session restarts the cast.
+    enabled: true
+
+    onClicked: miracast.setMode(modeValue)
+    onHovered: function(isHovered) {
+      if (!isHovered || root.reflowingText) return
+      root.cursorActive = true
+      root.focusSection = "miracastMode"
+      root.selectedIndex = modePill.modeIndex
+    }
+  }
+
+  component MiracastPosPill: Button {
+    id: posPill
+    required property string posValue
+    required property int posIndex
+
+    text: posValue === "left" ? "Left"
+          : posValue === "above" ? "Above"
+          : posValue === "below" ? "Below"
+          : "Right"
+    fontSize: Style.font.caption
+    foreground: root.bar.foreground
+    fontFamily: root.bar.fontFamily
+    horizontalPadding: Style.spacing.sm
+    verticalPadding: Style.spacing.controlPaddingY
+    bordered: true
+
+    active: miracast.extendPosition === posValue
+    hasCursor: root.cursorActive && root.focusSection === "miracastPos" && root.selectedIndex === posIndex
+    enabled: true
+
+    onClicked: miracast.setExtendPosition(posValue)
+    onHovered: function(isHovered) {
+      if (!isHovered || root.reflowingText) return
+      root.cursorActive = true
+      root.focusSection = "miracastPos"
+      root.selectedIndex = posPill.posIndex
+    }
+  }
+
+  component MiracastStreamModePill: Button {
+    id: streamPill
+    required property string modeId
+    required property int modeIndex
+
+    text: miracast.streamModeLabel(modeId)
+    fontSize: Style.font.caption
+    foreground: root.bar.foreground
+    fontFamily: root.bar.fontFamily
+    horizontalPadding: Style.spacing.sm
+    verticalPadding: Style.spacing.controlPaddingY
+    bordered: true
+
+    active: miracast.streamMode === modeId
+    hasCursor: root.cursorActive && root.focusSection === "miracastStream" && root.selectedIndex === modeIndex
+    enabled: !miracast.busy
+
+    onClicked: miracast.setStreamMode(modeId)
+    onHovered: function(isHovered) {
+      if (!isHovered || root.reflowingText) return
+      root.cursorActive = true
+      root.focusSection = "miracastStream"
+      root.selectedIndex = streamPill.modeIndex
+    }
+  }
+
+  component MonitorRow: Column {
     id: monitorRow
     required property var display
     required property int rowIndex
 
     readonly property bool isFocused: display && display.focused
     readonly property bool canToggle: display && (!display.enabled || root.enabledDisplayCount > 1)
+    readonly property bool expanded: display && root.isExpanded(display.name)
+    readonly property var scaleValues: root.scaleValuesFor(display)
+    readonly property bool showBrightness: display && display.brightnessAvailable === true && display.enabled
 
-    hasCursor: root.cursorActive && root.focusSection === "monitors" && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(monitorRow)
-    current: isFocused
+    width: parent ? parent.width : 0
+    spacing: Style.space(6)
+
+    CursorSurface {
+      id: monitorHeader
+      width: parent.width
+      hasCursor: root.cursorActive && root.focusSection === "monitors" && root.selectedIndex === monitorRow.rowIndex
+      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(monitorHeader)
+      current: monitorRow.isFocused
+      foreground: root.bar.foreground
+      fill: Style.hoverFillFor(root.bar.foreground, Color.accent)
+      currentFill: Style.selectedFillFor(root.bar.foreground, Color.accent)
+      implicitHeight: headerInner.implicitHeight + Style.spacing.xl
+      opacity: monitorRow.display && monitorRow.display.enabled ? 1.0 : 0.55
+
+      Row {
+        id: headerInner
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Style.space(6)
+        anchors.rightMargin: Style.space(6)
+        spacing: Style.space(8)
+
+        // Collapsed: right chevron (󰅂). Expanded: down chevron (󰅀).
+        Text {
+          text: monitorRow.expanded ? "󰅀" : "󰅂"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.body
+          width: Style.space(16)
+          horizontalAlignment: Text.AlignHCenter
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          text: "󰍹"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.title
+          width: Style.space(22)
+          horizontalAlignment: Text.AlignHCenter
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: {
+            var bits = [monitorRow.display.name]
+            if (monitorRow.display.miracast) bits.push("Miracast")
+            if (monitorRow.display.focused) bits.push("focused")
+            if (!monitorRow.display.enabled) bits.push("off")
+            return bits.join(" · ")
+          }
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+          width: parent.width - Style.space(16) - Style.space(22) - Style.space(14) - Style.space(24)
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        // Enable/disable hit target (separate from expand).
+        Text {
+          id: enableMark
+          textFormat: Text.PlainText
+          text: monitorRow.display.enabled ? "󰄬" : "󰄱"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.subtitle
+          width: Style.space(14)
+          horizontalAlignment: Text.AlignRight
+          anchors.verticalCenter: parent.verticalCenter
+          opacity: monitorRow.canToggle ? 1.0 : 0.35
+
+          MouseArea {
+            anchors.fill: parent
+            anchors.margins: -Style.space(4)
+            enabled: monitorRow.canToggle
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.toggleDisplay(monitorRow.display.name, monitorRow.display.enabled)
+          }
+        }
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        anchors.rightMargin: Style.space(28)  // leave the enable mark clickable
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onContainsMouseChanged: if (containsMouse && !root.reflowingText) {
+          root.cursorActive = true
+          root.focusSection = "monitors"
+          root.selectedIndex = monitorRow.rowIndex
+        }
+        onClicked: root.toggleExpanded(monitorRow.display.name)
+      }
+    }
+
+    Column {
+      visible: monitorRow.expanded && monitorRow.display && monitorRow.display.enabled
+      width: parent.width - Style.space(18)
+      x: Style.space(18)
+      spacing: Style.space(8)
+
+      // ---- Brightness (only when this output has a controllable backlight/DDC) ----
+      Column {
+        visible: monitorRow.showBrightness
+        width: parent.width
+        spacing: Style.space(4)
+
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(bLabel.implicitHeight, bPct.implicitHeight)
+
+          Text {
+            id: bLabel
+            text: "Brightness"
+            color: Qt.darker(root.bar.foreground, 1.25)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+          }
+          Text {
+            id: bPct
+            textFormat: Text.PlainText
+            text: Math.round(nestedBrightness.dragging ? nestedBrightness.liveValue : root.displayBrightness(monitorRow.display)) + "%"
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+
+        CursorSurface {
+          id: nestedBrightnessRow
+          width: parent.width
+          height: nestedBrightness.implicitHeight + Style.spacing.controlGap
+          hasCursor: root.cursorActive && root.focusSection === "monitorBrightness" && root.selectedIndex === monitorRow.rowIndex
+          onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(nestedBrightnessRow)
+          foreground: root.bar.foreground
+          outline: true
+
+          PanelSlider {
+            id: nestedBrightness
+            bar: root.bar
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            minimum: 1
+            maximum: 100
+            step: 1
+            value: root.displayBrightness(monitorRow.display)
+            integer: true
+            onMoved: function(v) { root.previewBrightness(monitorRow.display.name, v) }
+            onReleased: function(v) {
+              brightnessDebounce.stop()
+              root.setBrightness(monitorRow.display.name, v)
+            }
+          }
+
+          HoverHandler {
+            onHoveredChanged: if (hovered && !root.reflowingText) {
+              root.cursorActive = true
+              root.focusSection = "monitorBrightness"
+              root.selectedIndex = monitorRow.rowIndex
+            }
+          }
+        }
+      }
+
+      // ---- Scale ----
+      Column {
+        width: parent.width
+        spacing: Style.space(4)
+
+        Text {
+          text: "Scale"
+          color: Qt.darker(root.bar.foreground, 1.25)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Grid {
+          id: nestedScaleRow
+          width: parent.width
+          columns: Math.max(1, monitorRow.scaleValues.length)
+          spacing: Style.spacing.xs
+          readonly property real cellWidth: columns > 0
+            ? (width - spacing * (columns - 1)) / columns
+            : 0
+
+          Repeater {
+            model: monitorRow.scaleValues
+            ScalePill {
+              required property string modelData
+              required property int index
+              display: monitorRow.display
+              scaleValue: modelData
+              scaleIndex: index
+              width: nestedScaleRow.cellWidth
+            }
+          }
+        }
+      }
+    }
+  }
+
+  component MiracastPeerRow: CursorSurface {
+    id: peerRow
+    required property var peer
+    required property int rowIndex
+
+    hasCursor: root.cursorActive && root.focusSection === "miracastPeers" && root.selectedIndex === rowIndex
+    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(peerRow)
     foreground: root.bar.foreground
     fill: Style.hoverFillFor(root.bar.foreground, Color.accent)
     currentFill: Style.selectedFillFor(root.bar.foreground, Color.accent)
-    implicitHeight: monitorInner.implicitHeight + Style.spacing.xl
-    opacity: canToggle ? 1.0 : 0.45
+    implicitHeight: peerInner.implicitHeight + Style.spacing.xl
 
     Row {
-      id: monitorInner
+      id: peerInner
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
@@ -882,7 +1693,7 @@ Panel {
       spacing: Style.space(8)
 
       Text {
-        text: "󰍹"
+        text: "󰑋"
         color: root.bar.foreground
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.title
@@ -891,39 +1702,40 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
       }
 
-      Text {
-        textFormat: Text.PlainText
-        text: monitorRow.display.name + (monitorRow.display.focused ? " · focused" : "")
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        elide: Text.ElideRight
-        width: parent.width - Style.space(22) - Style.space(14) - Style.space(16)
+      Column {
+        width: parent.width - Style.space(22) - Style.space(8)
         anchors.verticalCenter: parent.verticalCenter
-      }
+        spacing: Style.space(1)
 
-      Text {
-        textFormat: Text.PlainText
-        text: monitorRow.display.enabled ? "󰄬" : ""
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.subtitle
-        width: Style.space(14)
-        horizontalAlignment: Text.AlignRight
-        anchors.verticalCenter: parent.verticalCenter
+        Text {
+          width: parent.width
+          text: Model.miracastPeerTitle(peerRow.peer)
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+        Text {
+          width: parent.width
+          text: Model.miracastPeerSubtitle(peerRow.peer)
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
       }
     }
 
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
-      cursorShape: monitorRow.canToggle ? Qt.PointingHandCursor : Qt.ArrowCursor
+      cursorShape: Qt.PointingHandCursor
       onContainsMouseChanged: if (containsMouse && !root.reflowingText) {
         root.cursorActive = true
-        root.focusSection = "monitors"
-        root.selectedIndex = monitorRow.rowIndex
+        root.focusSection = "miracastPeers"
+        root.selectedIndex = peerRow.rowIndex
       }
-      onClicked: if (monitorRow.canToggle) root.toggleDisplay(monitorRow.display.name, monitorRow.display.enabled)
+      onClicked: miracast.startCast(peerRow.peer ? peerRow.peer.mac : "")
     }
   }
 }

@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "omarchy.monitor",
   "name": "Display",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "author": "Omarchy",
-  "description": "Brightness slider and laptop display controls",
+  "description": "Brightness, text size, scale, displays, and Miracast / Wi-Fi Display mirroring.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,8 +13,9 @@
   },
   "barWidget": {
     "displayName": "Display",
-    "description": "Brightness slider and laptop display controls",
+    "description": "Brightness, text size, scale, displays, and Miracast mirroring.",
     "category": "System",
     "allowMultiple": false
-  }
+  },
+  "license": "MIT"
 }

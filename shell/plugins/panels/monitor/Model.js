@@ -111,6 +111,85 @@ function parseDisplays(raw) {
   }
 }
 
+function miracastPhaseLabel(phase) {
+  var value = String(phase || "idle")
+  if (value === "idle") return "Idle"
+  if (value === "scanning") return "Scanning"
+  if (value === "connecting") return "Connecting"
+  if (value === "dhcp") return "Waiting for IP"
+  if (value === "rtsp") return "Starting session"
+  if (value === "streaming") return "Mirroring"
+  if (value === "error") return "Error"
+  return value
+}
+
+function miracastPhaseHint(phase, message) {
+  var msg = String(message || "").trim()
+  if (msg !== "") return msg
+  var value = String(phase || "idle")
+  if (value === "idle") return "Scan for a Miracast display, then connect"
+  if (value === "scanning") return "Looking for Wi‑Fi Display sinks"
+  if (value === "connecting") return "Forming Wi‑Fi Direct group"
+  if (value === "dhcp") return "P2P is up — waiting for DHCP / RTSP"
+  if (value === "rtsp") return "Negotiating Miracast media"
+  if (value === "streaming") return "Desktop is mirroring"
+  if (value === "error") return "Cast failed — check doctor / firewall"
+  return "Ready"
+}
+
+function miracastIsActive(phase) {
+  var value = String(phase || "idle")
+  return value === "connecting" || value === "dhcp" || value === "rtsp" || value === "streaming" || value === "scanning"
+}
+
+function miracastDoctorSummary(doctor) {
+  if (!doctor) return "Doctor not run yet"
+  if (doctor.ready === true) {
+    var warns = typeof doctor.warn_count === "number" ? doctor.warn_count : 0
+    if (warns > 0) return "Ready with " + warns + " warning" + (warns === 1 ? "" : "s")
+    return "Ready to cast"
+  }
+  var fails = typeof doctor.fail_count === "number" ? doctor.fail_count : 0
+  return fails + " blocking issue" + (fails === 1 ? "" : "s")
+}
+
+function miracastPeerTitle(peer) {
+  if (!peer) return "Unknown"
+  return String(peer.name || peer.mac || "Unknown")
+}
+
+function miracastPeerSubtitle(peer) {
+  if (!peer) return ""
+  return String(peer.mac || "")
+}
+
+function miracastBarGlyph(phase, multiDisplay) {
+  var value = String(phase || "idle")
+  if (value === "streaming") return "󰖩"      // wifi / connected
+  if (value === "connecting" || value === "dhcp" || value === "rtsp") return "󰑋"  // cast / linking
+  if (value === "scanning") return "󰍉"       // search
+  return multiDisplay ? "󰍺" : "󰍹"
+}
+
+function miracastConnectionSummary(phase, peerName, peerMac, mode) {
+  var label = String(peerName || "").trim()
+  if (label === "") label = String(peerMac || "").trim()
+  var modeLabel = String(mode || "mirror") === "extend" ? "Extend" : "Mirror"
+  var value = String(phase || "idle")
+  if (value === "streaming") {
+    if (label !== "") return "Connected · " + label + " · " + modeLabel
+    return "Connected · " + modeLabel
+  }
+  if (value === "connecting" || value === "dhcp" || value === "rtsp") {
+    if (label !== "") return "Connecting · " + label
+    return "Connecting…"
+  }
+  if (value === "scanning") return "Scanning for Miracast sinks…"
+  if (value === "error") return "Miracast error"
+  if (label !== "") return "Last sink · " + label
+  return ""
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     clampBrightness: clampBrightness,
@@ -119,6 +198,14 @@ if (typeof module !== "undefined") {
     matchingScaleIndex: matchingScaleIndex,
     availableScales: availableScales,
     brightnessName: brightnessName,
-    parseDisplays: parseDisplays
+    parseDisplays: parseDisplays,
+    miracastPhaseLabel: miracastPhaseLabel,
+    miracastPhaseHint: miracastPhaseHint,
+    miracastIsActive: miracastIsActive,
+    miracastDoctorSummary: miracastDoctorSummary,
+    miracastPeerTitle: miracastPeerTitle,
+    miracastPeerSubtitle: miracastPeerSubtitle,
+    miracastBarGlyph: miracastBarGlyph,
+    miracastConnectionSummary: miracastConnectionSummary
   }
 }
