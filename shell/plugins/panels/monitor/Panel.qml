@@ -564,13 +564,26 @@ Panel {
     root.enabledDisplayCount = parsed.enabledDisplayCount
   }
 
+  function isMiracastOutputName(name, disp) {
+    var n = String(name || "")
+    if (!n) return false
+    if (disp && disp.miracast) return true
+    if (n.indexOf("HEADLESS") === 0) return true
+    if (miracast) {
+      if (miracast.lastPeerName && n === String(miracast.lastPeerName)) return true
+      // status.monitor while streaming / last session
+      if (miracast.castMonitor && n === String(miracast.castMonitor)) return true
+    }
+    return false
+  }
+
   function toggleDisplay(name, enabled) {
     if (!name) return
     if (enabled && root.enabledDisplayCount <= 1) return
 
-    // Disabling a live Miracast Extend output with hyprctl while wf-recorder
-    // still holds screencopy has frozen eDP hard (power-cycle). Tear the cast
-    // down through miracast-ctl stop instead of raw monitor,disable.
+    // NEVER hyprctl-disable a Miracast virtual output. That path freezes eDP
+    // under screencopy (30s–power-cycle). Always tear down via miracast-ctl stop,
+    // even if the UI thinks the cast is already inactive.
     if (enabled) {
       var disp = null
       for (var i = 0; i < displays.length; i++) {
@@ -579,8 +592,8 @@ Panel {
           break
         }
       }
-      if (disp && disp.miracast && miracast && miracast.active) {
-        miracast.stopCast()
+      if (isMiracastOutputName(name, disp)) {
+        if (miracast) miracast.stopCast()
         return
       }
     }
@@ -955,7 +968,8 @@ Panel {
         Column {
           id: panelColumn
           width: scrollArea.availableWidth
-          spacing: Style.space(14)
+          // Slightly denser than stock, but leave room to breathe.
+          spacing: Style.space(6)
 
           // ---------- Hero: display icon · title/status ----------
           Item {
@@ -971,6 +985,8 @@ Panel {
               phase: miracast.phase
               multiDisplay: root.displays.length > 1
               fontFamily: root.bar.fontFamily
+              // Drop the wifi arcs inside the monitor glass (hero size).
+              wifiVerticalNudge: 1
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
             }
@@ -978,10 +994,10 @@ Panel {
             Column {
               id: heroLabels
               anchors.left: heroIcon.right
-              anchors.leftMargin: Style.space(14)
+              anchors.leftMargin: Style.space(10)
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
+              spacing: Style.space(1)
 
               Text {
                 text: miracast.streaming && miracast.connectedLabel !== ""
@@ -1017,51 +1033,45 @@ Panel {
             }
           }
 
-          // ---------- Displays (top) ----------
+          // ---------- Displays + Miracast (single column; no rule between them) ----------
           PanelSeparator {
-            visible: root.showDisplaysSection
             foreground: root.bar.foreground
           }
 
           Column {
             width: parent.width
-            spacing: Style.space(10)
-            visible: root.showDisplaysSection
+            spacing: Style.space(4)
 
-            PanelSectionHeader {
-              text: "DISPLAYS"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              visible: root.showDisplaysSection
 
-            Repeater {
-              model: root.displays
+              DenseSectionLabel {
+                text: "DISPLAYS"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+              }
 
-              MonitorRow {
-                required property var modelData
-                required property int index
+              Repeater {
+                model: root.displays
 
-                width: panelColumn.width
-                display: modelData
-                rowIndex: index
+                MonitorRow {
+                  required property var modelData
+                  required property int index
+
+                  width: panelColumn.width
+                  display: modelData
+                  rowIndex: index
+                }
               }
             }
-          }
-
-          // ---------- Miracast / Wi-Fi Display ----------
-          PanelSeparator {
-            foreground: root.bar.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
 
             Item {
               width: parent.width
               implicitHeight: Math.max(miracastHeader.implicitHeight, miracastPhase.implicitHeight)
 
-              PanelSectionHeader {
+              DenseSectionLabel {
                 id: miracastHeader
                 text: "MIRACAST"
                 foreground: root.bar.foreground
@@ -1084,12 +1094,15 @@ Panel {
             }
 
             Text {
-              visible: miracast.connectedLabel !== "" || miracast.active
+              // Hero already shows the peer name while streaming — skip the
+              // duplicate "Connected to …" line to save vertical space.
+              visible: {
+                if (miracast.streaming) return false
+                if (miracast.connecting) return true
+                return miracast.connectedLabel !== ""
+              }
               width: parent.width
               text: {
-                if (miracast.streaming)
-                  return "Connected to " + (miracast.connectedLabel || "Miracast sink")
-                    + " · " + miracast.modeLabel
                 if (miracast.connecting)
                   return "Connecting to " + (miracast.connectedLabel || "Miracast sink") + "…"
                 if (miracast.connectedLabel !== "")
@@ -1128,12 +1141,13 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
+            // Flat subsection stack: label immediately above each control row.
             Column {
               visible: root.showMiracastSessionControls
               width: parent.width
-              spacing: Style.space(8)
+              spacing: Style.space(4)
 
-              PanelSectionHeader {
+              DenseSectionLabel {
                 text: "CAST MODE"
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
@@ -1160,84 +1174,76 @@ Panel {
                 }
               }
 
-              Column {
+              DenseSectionLabel {
+                visible: miracast.mode === "extend"
+                text: "EXTEND POSITION"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+              }
+
+              Text {
+                visible: miracast.mode === "extend" && miracast.positionWarning !== ""
+                width: parent.width
+                text: miracast.positionWarning
+                color: root.bar.urgent || root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+
+                PanelToolTip {
+                  visible: parent.visible
+                  delay: 0
+                  text: miracast.positionWarning
+                }
+              }
+
+              Grid {
+                id: miracastPosRow
                 visible: miracast.mode === "extend"
                 width: parent.width
-                spacing: Style.space(8)
+                columns: root.miracastPosValues.length
+                spacing: Style.spacing.xs
+                readonly property real cellWidth: root.miracastPosValues.length > 0
+                  ? (width - spacing * (columns - 1)) / columns
+                  : 0
 
-                PanelSectionHeader {
-                  text: "EXTEND POSITION"
-                  foreground: root.bar.foreground
-                  fontFamily: root.bar.fontFamily
-                }
-
-                Text {
-                  visible: miracast.positionWarning !== ""
-                  width: parent.width
-                  text: miracast.positionWarning
-                  color: root.bar.urgent || root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-
-                  PanelToolTip {
-                    visible: miracast.positionWarning !== ""
-                    delay: 0
-                    text: miracast.positionWarning
-                  }
-                }
-
-                Grid {
-                  id: miracastPosRow
-                  width: parent.width
-                  columns: root.miracastPosValues.length
-                  spacing: Style.spacing.xs
-                  readonly property real cellWidth: root.miracastPosValues.length > 0
-                    ? (width - spacing * (columns - 1)) / columns
-                    : 0
-
-                  Repeater {
-                    model: root.miracastPosValues
-                    MiracastPosPill {
-                      required property string modelData
-                      required property int index
-                      posValue: modelData
-                      posIndex: index
-                      width: miracastPosRow.cellWidth
-                    }
+                Repeater {
+                  model: root.miracastPosValues
+                  MiracastPosPill {
+                    required property string modelData
+                    required property int index
+                    posValue: modelData
+                    posIndex: index
+                    width: miracastPosRow.cellWidth
                   }
                 }
               }
 
-              Column {
+              DenseSectionLabel {
+                visible: root.miracastStreamModeIds.length > 0
+                text: "STREAM MODE"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+              }
+
+              Grid {
+                id: miracastStreamRow
                 visible: root.miracastStreamModeIds.length > 0
                 width: parent.width
-                spacing: Style.space(8)
+                columns: Math.min(root.miracastStreamModeIds.length, 4)
+                spacing: Style.spacing.xs
+                readonly property real cellWidth: columns > 0
+                  ? (width - spacing * (columns - 1)) / columns
+                  : 0
 
-                PanelSectionHeader {
-                  text: "STREAM MODE"
-                  foreground: root.bar.foreground
-                  fontFamily: root.bar.fontFamily
-                }
-
-                Grid {
-                  id: miracastStreamRow
-                  width: parent.width
-                  columns: Math.min(root.miracastStreamModeIds.length, 4)
-                  spacing: Style.spacing.xs
-                  readonly property real cellWidth: columns > 0
-                    ? (width - spacing * (columns - 1)) / columns
-                    : 0
-
-                  Repeater {
-                    model: root.miracastStreamModeIds
-                    MiracastStreamModePill {
-                      required property string modelData
-                      required property int index
-                      modeId: modelData
-                      modeIndex: index
-                      width: miracastStreamRow.cellWidth
-                    }
+                Repeater {
+                  model: root.miracastStreamModeIds
+                  MiracastStreamModePill {
+                    required property string modelData
+                    required property int index
+                    modeId: modelData
+                    modeIndex: index
+                    width: miracastStreamRow.cellWidth
                   }
                 }
               }
@@ -1257,9 +1263,9 @@ Panel {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(8)
-                anchors.rightMargin: Style.space(8)
-                spacing: Style.space(8)
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                spacing: Style.space(6)
 
                 PanelActionButton {
                   iconText: "󰍉"
@@ -1336,13 +1342,13 @@ Panel {
 
           Column {
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(4)
 
             Item {
               width: parent.width
               implicitHeight: Math.max(textSizeHeader.implicitHeight, textSizePx.implicitHeight)
 
-              PanelSectionHeader {
+              DenseSectionLabel {
                 id: textSizeHeader
                 text: "TEXT SIZE"
                 foreground: root.bar.foreground
@@ -1407,6 +1413,20 @@ Panel {
         }
       }
     }
+  }
+
+  // Denser than PanelSectionHeader (no glyph overshoot padding) for packed
+  // CAST MODE / POSITION / STREAM subsections and major section titles.
+  component DenseSectionLabel: Text {
+    property color foreground: Color.foreground
+    property string fontFamily: Style.font.family
+    textFormat: Text.PlainText
+    color: Qt.darker(foreground, 1.4)
+    font.family: fontFamily
+    font.pixelSize: Style.font.caption
+    font.bold: true
+    topPadding: 0
+    bottomPadding: 0
   }
 
   component ScalePill: Button {
@@ -1533,7 +1553,7 @@ Panel {
     readonly property bool showBrightness: display && display.brightnessAvailable === true && display.enabled
 
     width: parent ? parent.width : 0
-    spacing: Style.space(6)
+    spacing: Style.space(4)
 
     CursorSurface {
       id: monitorHeader
@@ -1544,7 +1564,7 @@ Panel {
       foreground: root.bar.foreground
       fill: Style.hoverFillFor(root.bar.foreground, Color.accent)
       currentFill: Style.selectedFillFor(root.bar.foreground, Color.accent)
-      implicitHeight: headerInner.implicitHeight + Style.spacing.xl
+      implicitHeight: headerInner.implicitHeight + Style.space(8)
       opacity: monitorRow.display && monitorRow.display.enabled ? 1.0 : 0.55
 
       Row {
@@ -1633,7 +1653,7 @@ Panel {
       visible: monitorRow.expanded && monitorRow.display && monitorRow.display.enabled
       width: parent.width - Style.space(18)
       x: Style.space(18)
-      spacing: Style.space(8)
+      spacing: Style.space(6)
 
       // ---- Brightness (only when this output has a controllable backlight/DDC) ----
       Column {
