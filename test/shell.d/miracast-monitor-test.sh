@@ -43,6 +43,9 @@ extract_fn unique_extend_output_name "$test_tmp/unique.sh"
 extract_fn extend_geometry_parts "$test_tmp/geometry.sh"
 extract_fn extend_resolution "$test_tmp/extend_res.sh"
 extract_fn capture_senders_alive "$test_tmp/senders.sh"
+extract_fn capture_output_fingerprint "$test_tmp/fingerprint.sh"
+extract_fn capture_geometry_drifted "$test_tmp/drifted.sh"
+extract_fn record_capture_geometry "$test_tmp/record_geom.sh"
 
 # --- stub hyprctl / brightness / scaling ---
 cat >"$stub_bin/hyprctl" <<'SH'
@@ -226,6 +229,36 @@ else
   [[ $alive == false ]] || fail "capture_senders_alive is false without wf-recorder/ffmpeg" "got $alive"
   pass "capture_senders_alive reports false when no senders exist"
 fi
+
+# ========== capture geometry fingerprint / drift (hypr reload black-screen) ==========
+# shellcheck source=/dev/null
+source "$test_tmp/fingerprint.sh"
+# shellcheck source=/dev/null
+source "$test_tmp/drifted.sh"
+# shellcheck source=/dev/null
+source "$test_tmp/record_geom.sh"
+geom_state="$test_tmp/geom-state"
+mkdir -p "$geom_state"
+HEADLESS_FILE="$geom_state/headless.name"
+CAPTURE_GEOM_FILE="$geom_state/capture.geometry"
+printf 'hotyeah-TV\n' >"$HEADLESS_FILE"
+cat >"$OMARCHY_TEST_MONITORS" <<'JSON'
+[{"name":"eDP-1","width":1920,"height":1080,"refreshRate":60,"scale":2,"x":0,"y":0},
+ {"name":"hotyeah-TV","width":1920,"height":1080,"refreshRate":30,"scale":2,"x":-960,"y":0}]
+JSON
+fp="$(capture_output_fingerprint)"
+[[ $fp == 'hotyeah-TV|1920|1080|30|2|-960|0' ]] ||
+  fail "capture_output_fingerprint formats tracked Extend geometry" "got $fp"
+record_capture_geometry
+[[ $(cat "$CAPTURE_GEOM_FILE") == "$fp" ]] || fail "record_capture_geometry persists fingerprint"
+[[ $(capture_geometry_drifted) == false ]] || fail "geometry not drifted when unchanged"
+cat >"$OMARCHY_TEST_MONITORS" <<'JSON'
+[{"name":"eDP-1","width":1920,"height":1080,"refreshRate":60,"scale":2,"x":0,"y":0},
+ {"name":"hotyeah-TV","width":1920,"height":1080,"refreshRate":30,"scale":2,"x":960,"y":0}]
+JSON
+[[ $(capture_geometry_drifted) == true ]] ||
+  fail "geometry drifted when Hyprland shoves Extend from left to right"
+pass "capture geometry fingerprint detects Hyprland reload/layout drift"
 
 # timeout(1) wrapper so monitor-scale's `timeout 5 hyprctl` works under stubs.
 cat >"$stub_bin/timeout" <<'SH'
@@ -639,6 +672,21 @@ rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl should document opt-in FLUXCAST_WFD_WF_RECORDER_DAMAGE"
 pass "miracast-ctl leaves damage-aware capture opt-in (not forced)"
 
+# Disconnect safety: never hypr-disable a live Miracast output under capture,
+# and always pause screencopy before headless remove.
+rg -q 'disp.miracast && miracast && miracast.active' "$PLUGIN/Panel.qml" ||
+  fail "toggleDisplay must stopCast instead of hyprctl-disable on live Miracast"
+rg -q 'pause_extend_capture' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must define pause_extend_capture"
+rg -q 'wait_capture_senders_gone' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "cleanup must wait for capture senders before output remove"
+# cleanup_extend_monitor body should pause before output remove
+awk '/^cleanup_extend_monitor\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capture' ||
+  fail "cleanup_extend_monitor must pause capture before removing headless"
+awk '/^cmd_stop\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" | rg -q 'pause_extend_capture' ||
+  fail "cmd_stop must pause capture before killing FluxCast / removing headless"
+pass "disconnect paths pause capture before disabling Miracast output"
+
 # ========== independent Extend workspaces: ext-N namespace, Lua migrate ==========
 extract_fn migrate_workspaces_from_monitor "$test_tmp/migrate.sh"
 extract_fn seed_extend_workspaces "$test_tmp/seed.sh"
@@ -649,9 +697,13 @@ rg -q 'name:ext-1' "$test_tmp/seed.sh" ||
 if rg -q 'tame_extend_workspaces' "$PLUGIN_BIN/miracast-ctl"; then
   fail "tame_extend_workspaces should be removed for independent Extend workspaces"
 fi
-# Helper maps Miracast SUPER+N to ext-N
+# Helpers map Miracast SUPER+N / SUPER+SHIFT+N to ext-N
 rg -q 'ext-' "$ROOT/bin/omarchy-hyprland-workspace-focus" ||
   fail "workspace-focus helper namespaces non-laptop monitors as ext-N"
+rg -q 'ext-' "$ROOT/bin/omarchy-hyprland-workspace-move" ||
+  fail "workspace-move helper namespaces non-laptop monitors as ext-N"
+rg -q 'omarchy-hyprland-workspace-move' "$ROOT/default/hypr/bindings/tiling.lua" ||
+  fail "tiling defaults should move windows via workspace-move helper"
 pass "Extend uses independent ext-N workspaces; disconnect migrate kept"
 
 # ========== monitor-scale persists Extend scale via remember-extend-scale ==========
