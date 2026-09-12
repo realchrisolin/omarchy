@@ -528,9 +528,9 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         ):
             return
         try:
-            # hotyeah (and some other sinks) return 454 if Session includes
-            # ";timeout=30" on M16 — they expect a bare session id. Without
-            # successful keepalives they TEARDOWN when the session timer fires.
+            # Some sinks return 454 if Session includes ";timeout=30" on M16 —
+            # they expect a bare session id. Without successful keepalives they
+            # TEARDOWN when the session timer fires.
             self._send_request(
                 "M16_KEEPALIVE",
                 "GET_PARAMETER",

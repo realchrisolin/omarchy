@@ -1,8 +1,11 @@
-"""Hardware H.264 encoder selection for WFD desktop capture.
+"""Optional hardware H.264 encoder selection for WFD desktop capture.
 
-Prefers VAAPI (then QSV) over libx264 when the device can encode. Power
-policy still prefers GPU — it is cheaper than software x264 — but on battery
-or the power-saver profile we bias toward lower bitrate / less GPU parallelism.
+Default encode path stays historical libx264 so existing FluxCast users see no
+pipeline change. Set FLUXCAST_WFD_ENCODER to vaapi, qsv, or auto (VAAPI then
+QSV then libx264) to opt into GPU encode.
+
+When a session is on battery or the power-profiles-daemon power-saver profile,
+bitrate / encoder presets bias toward efficient — including for libx264.
 """
 
 from __future__ import annotations
@@ -52,37 +55,49 @@ def _vaapi_device() -> str:
     return "/dev/dri/renderD128"
 
 
+def _sysfs_text(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def _is_system_supply(base: str) -> bool:
+    """Ignore Device-scoped supplies (HID UPS, mouse, etc.).
+
+    Missing scope is treated as System — older kernels omit the attribute on
+    the laptop pack / AC adapter.
+    """
+    scope = _sysfs_text(os.path.join(base, "scope"))
+    if scope is None:
+        return True
+    return scope.lower() == "system"
+
+
 def _on_mains_power() -> bool:
-    """True when AC is online or no battery is present."""
+    """True when system AC is online, or no system battery is present."""
     supply = "/sys/class/power_supply"
     try:
         names = os.listdir(supply)
     except OSError:
         return True
-    saw_battery = False
+    saw_system_battery = False
     for name in names:
         base = os.path.join(supply, name)
-        type_path = os.path.join(base, "type")
-        try:
-            kind = open(type_path, encoding="utf-8").read().strip().lower()
-        except OSError:
+        kind = (_sysfs_text(os.path.join(base, "type")) or "").lower()
+        if not kind or not _is_system_supply(base):
             continue
         if kind == "mains":
-            try:
-                online = open(os.path.join(base, "online"), encoding="utf-8").read().strip()
-            except OSError:
-                continue
-            if online == "1":
+            if _sysfs_text(os.path.join(base, "online")) == "1":
                 return True
         elif kind == "battery":
-            saw_battery = True
-            try:
-                status = open(os.path.join(base, "status"), encoding="utf-8").read().strip().lower()
-            except OSError:
-                continue
-            if status == "charging" or status == "full":
+            saw_system_battery = True
+            status = (_sysfs_text(os.path.join(base, "status")) or "").lower()
+            if status in ("charging", "full"):
                 return True
-    return not saw_battery
+    # Desktop / no system pack → treat as mains so we do not trim bitrate.
+    return not saw_system_battery
 
 
 def _power_profile() -> str:
@@ -103,10 +118,19 @@ def _power_profile() -> str:
 
 
 def power_bias() -> str:
-    """full | efficient — efficient on battery or power-saver profile."""
+    """full | efficient — efficient on battery or power-saver profile.
+
+    Automatic battery / power-saver detection only engages when GPU encode was
+    opted in (FLUXCAST_WFD_ENCODER=vaapi|qsv|auto) or the caller set
+    FLUXCAST_WFD_ENCODE_BIAS explicitly. Default libx264 sessions keep
+    historical bitrate and presets.
+    """
     override = os.environ.get("FLUXCAST_WFD_ENCODE_BIAS", "").strip().lower()
     if override in ("full", "efficient"):
         return override
+    encoder = _requested_encoder()
+    if encoder in ("libx264", "x264", "software", "sw"):
+        return "full"
     if not _on_mains_power():
         return "efficient"
     if _power_profile() == "power-saver":
@@ -138,7 +162,9 @@ def _map_vaapi_profile(h264_profile: str) -> str:
 
 
 def _requested_encoder() -> str:
-    return os.environ.get("FLUXCAST_WFD_ENCODER", "auto").strip().lower() or "auto"
+    # Default libx264 preserves the historical WFD pipeline for existing users.
+    # Opt into GPU with FLUXCAST_WFD_ENCODER=vaapi|qsv|auto.
+    return os.environ.get("FLUXCAST_WFD_ENCODER", "libx264").strip().lower() or "libx264"
 
 
 def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
@@ -156,15 +182,17 @@ def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
     return bitrate_text
 
 
-def probe_encoder(prefer: str = "auto") -> str:
-    prefer = (prefer or "auto").strip().lower()
+def probe_encoder(prefer: str = "libx264") -> str:
+    prefer = (prefer or "libx264").strip().lower()
     if prefer in ("libx264", "x264", "software", "sw"):
         return "libx264"
     if prefer == "vaapi":
         return "vaapi" if _ffmpeg_has_encoder("h264_vaapi") else "libx264"
     if prefer == "qsv":
         return "qsv" if _ffmpeg_has_encoder("h264_qsv") else "libx264"
-    # auto: VAAPI first on this stack (Iris Xe), then QSV, then software.
+    if prefer != "auto":
+        return "libx264"
+    # Explicit auto only: VAAPI, then QSV, then software.
     if _ffmpeg_has_encoder("h264_vaapi") and os.path.exists(_vaapi_device()):
         return "vaapi"
     if _ffmpeg_has_encoder("h264_qsv"):
