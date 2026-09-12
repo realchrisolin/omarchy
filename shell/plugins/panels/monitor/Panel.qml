@@ -572,13 +572,26 @@ Panel {
     if (!actionProc.running) actionProc.running = true
   }
 
+  // Queue scale while actionProc is busy — otherwise a mid-cast scale click
+  // only updates .command and never re-runs (capture stays paused/dead).
+  property string pendingScaleMonitor: ""
+  property string pendingScaleValue: ""
+  property bool scaleQueued: false
+
   function setScale(monitorName, scale) {
     var name = String(monitorName || root.focusedMonitor || "")
     if (name === "") return
-    actionProc.command = [root.pluginBin + "/monitor-scale", name, String(scale)]
-    if (!actionProc.running) actionProc.running = true
     // Optimistic UI update so the active pill changes immediately.
     updateDisplayScale(name, scale)
+    if (actionProc.running) {
+      root.pendingScaleMonitor = name
+      root.pendingScaleValue = String(scale)
+      root.scaleQueued = true
+      return
+    }
+    root.scaleQueued = false
+    actionProc.command = [root.pluginBin + "/monitor-scale", name, String(scale)]
+    actionProc.running = true
   }
 
   function updateDisplayScale(name, scale) {
@@ -763,7 +776,22 @@ Panel {
   Process {
     id: actionProc
     stdout: StdioCollector { waitForEnd: true }
-    onRunningChanged: if (!running) root.refresh()
+    onRunningChanged: {
+      if (running) return
+      if (root.scaleQueued) {
+        var name = root.pendingScaleMonitor
+        var scale = root.pendingScaleValue
+        root.scaleQueued = false
+        root.pendingScaleMonitor = ""
+        root.pendingScaleValue = ""
+        if (name !== "" && scale !== "") {
+          actionProc.command = [root.pluginBin + "/monitor-scale", name, scale]
+          actionProc.running = true
+          return
+        }
+      }
+      root.refresh()
+    }
   }
 
   // Applies text size via the CLI, which rewrites the shell override file;
@@ -907,7 +935,6 @@ Panel {
               spacing: Style.space(2)
 
               Text {
-                textFormat: Text.PlainText
                 text: miracast.streaming && miracast.connectedLabel !== ""
                       ? miracast.connectedLabel
                       : "Display"
@@ -921,7 +948,6 @@ Panel {
 
               Text {
                 id: heroLabel
-                textFormat: Text.PlainText
                 text: {
                   var summary = Model.miracastConnectionSummary(
                     miracast.phase, miracast.lastPeerName, miracast.lastPeerMac, miracast.mode)
@@ -1278,7 +1304,6 @@ Panel {
 
               Text {
                 id: textSizePx
-                textFormat: Text.PlainText
                 text: (textSizeSlider.dragging
                        ? root.textSizeStops[Math.round(textSizeSlider.liveValue)]
                        : root.displayedTextPx()) + "px"
@@ -1504,7 +1529,6 @@ Panel {
         }
 
         Text {
-          textFormat: Text.PlainText
           text: {
             var bits = [monitorRow.display.name]
             if (monitorRow.display.miracast) bits.push("Miracast")
@@ -1523,7 +1547,6 @@ Panel {
         // Enable/disable hit target (separate from expand).
         Text {
           id: enableMark
-          textFormat: Text.PlainText
           text: monitorRow.display.enabled ? "󰄬" : "󰄱"
           color: root.bar.foreground
           font.family: root.bar.fontFamily
@@ -1585,7 +1608,6 @@ Panel {
           }
           Text {
             id: bPct
-            textFormat: Text.PlainText
             text: Math.round(nestedBrightness.dragging ? nestedBrightness.liveValue : root.displayBrightness(monitorRow.display)) + "%"
             color: Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily

@@ -177,12 +177,78 @@ pass "extend_geometry_parts places Extend using logical sizes"
 source "$test_tmp/senders.sh"
 HEADLESS_FILE="$state_dir/headless.name"
 alive="$(capture_senders_alive)"
-[[ $alive == false ]] || fail "capture_senders_alive is false without wf-recorder/ffmpeg" "got $alive"
-pass "capture_senders_alive reports false when no senders exist"
+if [[ $alive == true ]]; then
+  # Host may have a live Miracast session; do not fail the file on that.
+  pass "capture_senders_alive sees host senders (live cast); skipping empty-proc assertion"
+else
+  [[ $alive == false ]] || fail "capture_senders_alive is false without wf-recorder/ffmpeg" "got $alive"
+  pass "capture_senders_alive reports false when no senders exist"
+fi
 
-# ========== monitor-scale eDP with live Miracast: pause before remap ==========
-: >"$hypr_log"
-: >"$ctl_log"
+# timeout(1) wrapper so monitor-scale's `timeout 5 hyprctl` works under stubs.
+cat >"$stub_bin/timeout" <<'SH'
+#!/bin/bash
+# Usage: timeout SECONDS CMD...
+shift
+exec "$@"
+SH
+chmod +x "$stub_bin/timeout"
+
+# Put recording miracast-ctl beside monitor-scale (CTL is resolved next to self).
+fake_plugin_bin="$test_tmp/fake-plugin/bin"
+mkdir -p "$fake_plugin_bin"
+# Prefer the live plugin copy under test when present; fall back to repo path.
+SCALE_SRC="$PLUGIN_BIN/monitor-scale"
+if [[ -x ${OMARCHY_TEST_MONITOR_SCALE:-} ]]; then
+  SCALE_SRC="$OMARCHY_TEST_MONITOR_SCALE"
+fi
+cp "$SCALE_SRC" "$fake_plugin_bin/monitor-scale"
+cp "$stub_bin/miracast-ctl" "$fake_plugin_bin/miracast-ctl"
+chmod +x "$fake_plugin_bin"/*
+
+run_monitor_scale() {
+  local scale_arg="${1:-2}"
+  : >"$hypr_log"
+  : >"$ctl_log"
+  # Long deferred sleep so the async safety-net does not race the sync path
+  # (otherwise ensure-capture can appear in ctl_log before pause-capture).
+  HOME="$home_dir" \
+    XDG_STATE_HOME="$home_dir/.local/state" \
+    XDG_CONFIG_HOME="$home_dir/.config" \
+    PATH="$stub_bin:$PATH" \
+    OMARCHY_TEST_MONITORS="$monitors_file" \
+    OMARCHY_TEST_HYPR_LOG="$hypr_log" \
+    OMARCHY_TEST_CTL_LOG="$ctl_log" \
+    OMARCHY_TEST_DEFER_SLEEP=60 \
+    OMARCHY_TEST_ENSURE_SLEEP=0 \
+    bash "$fake_plugin_bin/monitor-scale" eDP-1 "$scale_arg"
+  # Stop deferred ensure background jobs from this invocation.
+  pkill -f "deferred ensure-capture" 2>/dev/null || true
+  # The deferred subshell is `sleep 60; ctl ensure...` — kill stray sleeps started
+  # under our fake plugin path by matching the scale log marker process group.
+  # Best-effort: kill children still sleeping from monitor-scale backgrounded blocks.
+  pkill -P $$ -f "^sleep 60$" 2>/dev/null || true
+}
+
+assert_pause_before_hypr_and_ensure() {
+  local label="$1"
+  local first_ctl pause_line ensure_line hypr_lines
+  first_ctl="$(awk 'NR==1{print; exit}' "$ctl_log")"
+  [[ $first_ctl == pause-capture* || $first_ctl == pause_capture* ]] ||
+    fail "$label: pauses capture before eDP remap" "first ctl: ${first_ctl:-<empty>}; ctl_log=$(cat "$ctl_log")"
+
+  pause_line="$(grep -nE 'pause-capture|pause_capture' "$ctl_log" | head -1 | cut -d: -f1)"
+  ensure_line="$(grep -nE 'ensure-capture|ensure_capture' "$ctl_log" | head -1 | cut -d: -f1)"
+  [[ -n $pause_line && -n $ensure_line ]] ||
+    fail "$label: records both pause and ensure" "ctl_log=$(cat "$ctl_log")"
+  (( pause_line < ensure_line )) ||
+    fail "$label: pause precedes ensure" "pause=$pause_line ensure=$ensure_line ctl=$(cat "$ctl_log")"
+
+  hypr_lines="$(grep -c 'hl.monitor' "$hypr_log" || true)"
+  (( hypr_lines >= 1 )) || fail "$label: applies hl.monitor geometry" "hypr log: $(cat "$hypr_log")"
+}
+
+# ========== monitor-scale eDP with tracked Extend: pause before remap ==========
 printf '%s\n' 'hotyeah-8D5117_P2P' >"$state_dir/headless.name"
 printf '%s\n' '{"extendPosition":"right","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' >"$config_dir/settings.json"
 printf '%s\n' '[
@@ -194,38 +260,145 @@ local omarchy_gdk_scale = 1
 local omarchy_monitor_scale = 1
 LUA
 
-# Put recording miracast-ctl on PATH ahead of everything; monitor-scale resolves
-# CTL next to itself, so point it at a wrapper copy beside a fake plugin bin.
-fake_plugin_bin="$test_tmp/fake-plugin/bin"
-mkdir -p "$fake_plugin_bin"
-cp "$PLUGIN_BIN/monitor-scale" "$fake_plugin_bin/monitor-scale"
-cp "$stub_bin/miracast-ctl" "$fake_plugin_bin/miracast-ctl"
-chmod +x "$fake_plugin_bin"/*
-
-scale_out="$(
-  HOME="$home_dir" \
-    XDG_STATE_HOME="$home_dir/.local/state" \
-    XDG_CONFIG_HOME="$home_dir/.config" \
-    PATH="$stub_bin:$PATH" \
-    OMARCHY_TEST_MONITORS="$monitors_file" \
-    OMARCHY_TEST_HYPR_LOG="$hypr_log" \
-    OMARCHY_TEST_CTL_LOG="$ctl_log" \
-    bash "$fake_plugin_bin/monitor-scale" eDP-1 2
-)"
+scale_out="$(run_monitor_scale 2)"
 [[ $scale_out == 2 ]] || fail "monitor-scale reports cleaned scale" "got $scale_out"
-
-# pause-capture must be recorded before any hyprctl eval for the eDP remap.
-first_ctl="$(awk 'NR==1{print; exit}' "$ctl_log")"
-[[ $first_ctl == pause-capture* || $first_ctl == pause_capture* ]] ||
-  fail "monitor-scale pauses capture before eDP remap when Miracast is live" "first ctl: ${first_ctl:-<empty>}"
-
-grep -E 'ensure-capture|ensure_capture' "$ctl_log" >/dev/null ||
-  fail "monitor-scale ensures capture after eDP scale settle"
-
+assert_pause_before_hypr_and_ensure "tracked Extend"
 # Reseat must force Extend scale back to 1 (not inherit eDP's 2).
 grep -F 'scale = 1' "$hypr_log" >/dev/null ||
   fail "monitor-scale reseat forces Extend output scale 1" "hypr log: $(cat "$hypr_log")"
+# While rebinding, skip ScreenMoveRemap nudge (single apply — not nudge+restore).
+# Stub logs both `eval hl.monitor(...)` and the bare lua payload; count payloads.
+edp_evals="$(grep -c '^hl.monitor({ output = "eDP-1"' "$hypr_log" || true)"
+(( edp_evals == 1 )) ||
+  fail "monitor-scale applies eDP geometry once while Miracast rebind is needed" "count=$edp_evals hypr=$(cat "$hypr_log")"
 pass "monitor-scale pauses before eDP remap and ensures capture with Extend scale 1"
+
+# ========== monitor-scale: status.json monitor fallback without headless.name ==========
+rm -f "$state_dir/headless.name"
+printf '%s\n' '{"phase":"streaming","monitor":"hotyeah-8D5117_P2P","extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' \
+  >"$state_dir/status.json"
+# settings still needed for reseat geometry
+printf '%s\n' '{"extendPosition":"left","extendResolution":"1920x1080","extendRefresh":"30","fps":"30"}' >"$config_dir/settings.json"
+scale_out="$(run_monitor_scale 1.6)"
+# clean_scale may normalize 1.6
+[[ -n $scale_out ]] || fail "monitor-scale returns a scale with status.json fallback"
+assert_pause_before_hypr_and_ensure "status.json fallback"
+pass "monitor-scale rebinds using status.json monitor when headless.name is missing"
+
+# ========== monitor-scale: hyprctl hang still schedules deferred ensure ==========
+cat >"$stub_bin/hyprctl" <<'SH'
+#!/bin/bash
+echo "$*" >>"${OMARCHY_TEST_HYPR_LOG:-/dev/null}"
+if [[ ( $1 == "-j" && $2 == "monitors" ) || ( $1 == "monitors" && $2 == "-j" ) || ( $1 == "monitors" && $2 == "all" && $3 == "-j" ) ]]; then
+  cat "${OMARCHY_TEST_MONITORS:?}"
+  exit 0
+fi
+if [[ $1 == "eval" ]]; then
+  printf '%s\n' "$2" >>"${OMARCHY_TEST_HYPR_LOG:-/dev/null}"
+  # Simulate the hang that previously killed monitor-scale after pause.
+  if [[ ${OMARCHY_TEST_HYPR_HANG:-0} == 1 ]]; then
+    sleep 30
+  fi
+  exit 0
+fi
+if [[ $1 == "dispatch" || $1 == "output" ]]; then
+  exit 0
+fi
+exit 1
+SH
+chmod +x "$stub_bin/hyprctl"
+
+# timeout stub that kills long hyprctl evals like the real timeout(1).
+cat >"$stub_bin/timeout" <<'SH'
+#!/bin/bash
+secs="$1"
+shift
+if [[ $1 == hyprctl && $2 == eval && ${OMARCHY_TEST_HYPR_HANG:-0} == 1 ]]; then
+  echo "timeout-fired $*" >>"${OMARCHY_TEST_HYPR_LOG:-/dev/null}"
+  exit 124
+fi
+exec "$@"
+SH
+chmod +x "$stub_bin/timeout"
+
+printf '%s\n' 'hotyeah-8D5117_P2P' >"$state_dir/headless.name"
+: >"$ctl_log"
+: >"$hypr_log"
+: >"$state_dir/logs/scale.log"
+OMARCHY_TEST_HYPR_HANG=1 \
+  HOME="$home_dir" \
+  XDG_STATE_HOME="$home_dir/.local/state" \
+  XDG_CONFIG_HOME="$home_dir/.config" \
+  PATH="$stub_bin:$PATH" \
+  OMARCHY_TEST_MONITORS="$monitors_file" \
+  OMARCHY_TEST_HYPR_LOG="$hypr_log" \
+  OMARCHY_TEST_CTL_LOG="$ctl_log" \
+  OMARCHY_TEST_DEFER_SLEEP=0 \
+  OMARCHY_TEST_ENSURE_SLEEP=0 \
+  bash "$fake_plugin_bin/monitor-scale" eDP-1 2 >/dev/null
+# Allow deferred ensure (sleep 0) to finish writing ctl_log.
+sleep 0.2
+pkill -P $$ -f "^sleep " 2>/dev/null || true
+
+grep -E 'pause-capture|pause_capture' "$ctl_log" >/dev/null ||
+  fail "hang path still pauses capture" "ctl=$(cat "$ctl_log")"
+ensure_count="$(grep -cE 'ensure-capture|ensure_capture' "$ctl_log" || true)"
+(( ensure_count >= 2 )) ||
+  fail "hang path still runs ensure-capture (foreground and/or deferred)" "count=$ensure_count ctl=$(cat "$ctl_log")"
+grep -F 'timeout-fired' "$hypr_log" >/dev/null ||
+  fail "hang path bounds hyprctl eval with timeout" "hypr=$(cat "$hypr_log")"
+scale_log_file="$state_dir/logs/scale.log"
+[[ -f $scale_log_file ]] || fail "monitor-scale writes scale.log"
+grep -F 'done ' "$scale_log_file" >/dev/null ||
+  fail "monitor-scale reaches done after hyprctl timeout" "scale.log=$(cat "$scale_log_file")"
+grep -F 'hyprctl eval failed/timeout' "$scale_log_file" >/dev/null ||
+  fail "scale.log records hyprctl timeout" "scale.log=$(cat "$scale_log_file")"
+pass "monitor-scale recovers via timeout + ensure when hyprctl hangs after pause"
+
+# ========== fluxcast_pid ignores shell wrappers that mention main.py ==========
+extract_fn fluxcast_pid "$test_tmp/fluxcast_pid.sh"
+# shellcheck source=/dev/null
+source "$test_tmp/fluxcast_pid.sh"
+PID_FILE="$state_dir/cast.pid"
+printf '%s\n' "$$" >"$PID_FILE"
+# This test shell's argv may mention fluxcast strings via the agent; fluxcast_pid
+# must require a python interpreter exe, so it should return empty here.
+found_pid="$(fluxcast_pid || true)"
+# If a real FluxCast python is running on the host, that is a valid hit — only
+# fail when we matched *this* shell (non-python).
+if [[ -n $found_pid ]]; then
+  exe_base="$(basename "$(readlink -f /proc/$found_pid/exe 2>/dev/null || echo x)")"
+  [[ $exe_base == python* ]] ||
+    fail "fluxcast_pid must not match non-python wrappers" "pid=$found_pid exe=$exe_base"
+  pass "fluxcast_pid returns a real python FluxCast process when one is live"
+else
+  pass "fluxcast_pid returns empty when no FluxCast python is running"
+fi
+
+# Restore fast hyprctl stub for later tests.
+cat >"$stub_bin/hyprctl" <<'SH'
+#!/bin/bash
+echo "$*" >>"${OMARCHY_TEST_HYPR_LOG:-/dev/null}"
+if [[ ( $1 == "-j" && $2 == "monitors" ) || ( $1 == "monitors" && $2 == "-j" ) || ( $1 == "monitors" && $2 == "all" && $3 == "-j" ) ]]; then
+  cat "${OMARCHY_TEST_MONITORS:?}"
+  exit 0
+fi
+if [[ $1 == "eval" ]]; then
+  printf '%s\n' "$2" >>"${OMARCHY_TEST_HYPR_LOG:-/dev/null}"
+  exit 0
+fi
+if [[ $1 == "dispatch" || $1 == "output" ]]; then
+  exit 0
+fi
+exit 1
+SH
+chmod +x "$stub_bin/hyprctl"
+cat >"$stub_bin/timeout" <<'SH'
+#!/bin/bash
+shift
+exec "$@"
+SH
+chmod +x "$stub_bin/timeout"
 
 # ========== Model.js Miracast helpers ==========
 run_node_test <<JS
