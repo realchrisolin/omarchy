@@ -1,10 +1,13 @@
 #!/bin/bash
+# omarchy:summary=Focus workspace N on the focused monitor (laptop 1-10 / ext-N)
+# omarchy:args=<1-10>
+# omarchy:examples=omarchy hyprland workspace-focus 3
 # Focus "workspace N" on the currently focused monitor with per-display
 # independence:
 #   - Laptop panels (eDP/LVDS/DSI): numeric workspaces 1-10
 #   - Other monitors (Miracast Extend, HDMI, …): named workspaces ext-1..ext-10
 # So SUPER+3 on eDP never touches ext-3 on the TV, and vice versa.
-# Moving windows between displays is intentionally not handled here.
+# Moving windows uses omarchy-hyprland-workspace-move.
 
 set -euo pipefail
 

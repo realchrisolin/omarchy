@@ -1,0 +1,65 @@
+#!/bin/bash
+# omarchy:summary=Move the active window to workspace N on the focused monitor
+# omarchy:args=<1-10> [--silent]
+# omarchy:examples=omarchy hyprland workspace-move 3 | omarchy hyprland workspace-move 2 --silent
+# Move the active window to "workspace N" on the currently focused monitor
+# with the same per-display independence as omarchy-hyprland-workspace-focus:
+#   - Laptop panels (eDP/LVDS/DSI): numeric workspaces 1-10
+#   - Other monitors (Miracast Extend, HDMI, …): named workspaces ext-1..ext-10
+# --silent keeps focus on the current workspace (follow = false).
+
+set -euo pipefail
+
+n=""
+silent=0
+for arg in "$@"; do
+  case "$arg" in
+    --silent) silent=1 ;;
+    -*)
+      echo "usage: $(basename "$0") <1-10> [--silent]" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$n" ]]; then
+        echo "usage: $(basename "$0") <1-10> [--silent]" >&2
+        exit 1
+      fi
+      n="$arg"
+      ;;
+  esac
+done
+
+[[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= 10 )) || {
+  echo "usage: $(basename "$0") <1-10> [--silent]" >&2
+  exit 1
+}
+
+is_laptop_monitor() {
+  case "${1:-}" in
+    eDP*|LVDS*|DSI*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+json_monitors="$(hyprctl -j monitors 2>/dev/null || true)"
+[[ -n "$json_monitors" ]] || exit 1
+
+current_mon="$(python3 -c '
+import json, sys
+ms = json.loads(sys.argv[1])
+m = next((x for x in ms if x.get("focused")), None)
+print((m or {}).get("name") or "")
+' "$json_monitors")"
+[[ -n "$current_mon" ]] || exit 1
+
+if is_laptop_monitor "$current_mon"; then
+  target="$n"
+else
+  target="name:ext-${n}"
+fi
+
+if (( silent )); then
+  hyprctl dispatch "hl.dsp.window.move({ workspace = \"${target}\", follow = false })" >/dev/null
+else
+  hyprctl dispatch "hl.dsp.window.move({ workspace = \"${target}\" })" >/dev/null
+fi
