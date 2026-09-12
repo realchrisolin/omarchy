@@ -102,8 +102,10 @@ BarWidget {
       }
     } catch (e2) {}
 
-    // Primary Quickshell screen ↔ laptop connector; any other screen with a
-    // single external Hyprland output ↔ that output (Miracast Extend case).
+    // Prefer the laptop connector for the primary / origin screen. A previous
+    // fallback mapped "any non-primary Qt screen" to the sole external output
+    // (Miracast). That made the eDP bar track ext-1, so the indicator stuck on
+    // "1" while SUPER+N correctly switched numeric workspaces on eDP.
     try {
       var screens = Quickshell.screens
       var primary = screens && screens.length ? screens[0] : null
@@ -117,10 +119,23 @@ BarWidget {
         else
           externals.push(m)
       }
-      if (primary && screen === primary && laptop)
-        return String(laptop.name)
-      if ((!primary || screen !== primary) && externals.length === 1)
-        return String(externals[0].name)
+      if (laptop) {
+        if (primary && screen === primary)
+          return String(laptop.name)
+        try {
+          if (Math.abs(Number(screen.x)) < 2 && Math.abs(Number(screen.y)) < 2)
+            return String(laptop.name)
+        } catch (eOrig) {}
+      }
+      try {
+        var sx2 = Number(screen.x)
+        var sy2 = Number(screen.y)
+        for (i = 0; i < externals.length; i++) {
+          m = externals[i]
+          if (Number(m.x) === sx2 && Number(m.y) === sy2)
+            return String(m.name)
+        }
+      } catch (eExt) {}
     } catch (e3) {}
 
     return screenName

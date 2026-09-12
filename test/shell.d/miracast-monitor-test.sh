@@ -740,6 +740,19 @@ assert(M.miracastCaptureEncodeActive("", "", "vaapi") === "vaapi", "pref");
 JS
 fi
 pass "miracast-ctl RENDER ENGINE captureEncode wiring"
+rg -q '"defaultExtendScale": 1' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "defaultExtendScale should default to 1 for Hyprland perf"
+pass "miracast-ctl defaultExtendScale is 1"
+rg -q 'cast_hypr_perf_apply' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must apply Hyprland cast perf profile"
+rg -q 'cast_hypr_perf_restore' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must restore Hyprland look after cast"
+rg -q 'border_size = 2' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "cast hypr profile must keep focus borders (border_size=2)"
+pass "miracast-ctl applies Hyprland cast perf profile"
+
+
+
 
 
 # Disconnect safety: never hypr-disable a Miracast output (even if cast looks idle),

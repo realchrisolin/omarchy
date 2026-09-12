@@ -20,7 +20,8 @@ from `bin/miracast-ctl` on each read.
 | *(env)* `FLUXCAST_WFD_DMABUF_ALLOW_SCALED` | allow (default) | `0`/`false` = force pipe when Hyprland scale ≠ 1 |
 | `captureEncode` | `dmabuf` | RENDER ENGINE: `dmabuf` (GPU·DMA-BUF) / `vaapi` (GPU·VAAPI) / `cpu` |
 | *(env)* `FLUXCAST_WFD_VAAPI_QP` | `18` | DMA CQP quantizer (lower = sharper / more bitrate) |
-| `sinkScales` | `{}` | Per-sink Extend scale, keyed by MAC |
+| `sinkScales` | `{}` | Per-sink Extend scale, keyed by MAC (overrides default) |
+| `defaultExtendScale` | `1` | Extend scale when unset — **1** is cheapest for Hyprland |
 | `onlyExpandFocusedDisplay` | `false` | `false` = expand all display rows; `true` = accordion (focused only) |
 
 ### Display panel expansion
@@ -33,14 +34,22 @@ from `bin/miracast-ctl` on each read.
   connected outputs expand too. Rows can still be collapsed individually.
 - **`true`:** only one row expanded (follows focused output) — previous accordion.
 
-While Miracast is connected, cast session controls (**CAST MODE**, **EXTEND
-POSITION**, **STREAM MODE**, **RENDER ENGINE**) appear under the Miracast
-display row next to **SCALE**. Scan / firewall / doctor / Stop remain under the
-**MIRACAST** section.
+While Miracast is connected, cast session controls (**CAST MODE** and
+**EXTEND POSITION** ← ↑ ↓ → on one row with a separator when Extend is active,
+**STREAM MODE**, **RENDER ENGINE**) appear under the Miracast display row next
+to **SCALE**. Scan / firewall / doctor / Stop remain under the **MIRACAST**
+section.
+
+With focus on the CAST MODE / EXTEND POSITION row and Extend active, vim
+**hjkl** set position: **h** ← left, **j** ↓ below, **k** ↑ above, **l** → right.
 
 **RENDER ENGINE** (connected only): `dmabuf` / `vaapi` / `cpu` — default DMA-BUF.
 GPU failures fall back to CPU; the active pill tracks the resolved encode path.
 See `miracast-ctl set-capture-encode` and `captureEncode` in settings.
+
+Capture uses continuous `wf-recorder -D` by default (better for Hyprland on Extend
+than damage-aware). While connected, Hyprland animations are disabled and restored
+on stop; borders/gaps stay so focus and workspace UI keep working.
 
 ## Virtual output lifecycle (eDP safety)
 
