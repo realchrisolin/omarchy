@@ -78,8 +78,8 @@ outputs. For a live desktop cast this rarely matters.
 
 ## Measured performance (same laptop, live Miracast)
 
-See **[BENCHMARKS.md](BENCHMARKS.md)** for the full capture × RENDER ENGINE
-matrix (ICC/stock × DMA-BUF/VAAPI/CPU), charts, and method notes.
+Full capture × RENDER ENGINE matrix and charts:
+[omarchy-miracast BENCHMARKS.md](https://github.com/realchrisolin/omarchy-miracast/blob/master/BENCHMARKS.md).
 
 Headline (DMA-BUF encode, ~18s samples, % of one core):
 
