@@ -685,6 +685,18 @@ rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE=0' "$PLUGIN_BIN/miracast-ctl" ||
   fail "must document FLUXCAST_WFD_WF_RECORDER_DAMAGE=0 for continuous -D"
 pass "miracast-ctl defaults to damage-aware capture"
 
+# ========== wf-recorder: stock PATH default; ICC opt-in only ==========
+rg -q 'resolve_wf_recorder_env' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must resolve optional custom wf-recorder"
+# No automatic probing of developer build trees (portable default = PATH).
+if awk '/^resolve_wf_recorder_env\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" |
+     rg -q 'src/wf-recorder/build'; then
+  fail "resolve_wf_recorder_env must not auto-probe ~/src/wf-recorder/build"
+fi
+rg -q 'wfRecorderBin' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "settings must document wfRecorderBin for explicit ICC opt-in"
+pass "miracast-ctl uses PATH wf-recorder by default (ICC opt-in only)"
+
 # ========== capture encode / RENDER ENGINE ==========
 rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE_FILE' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl must export FLUXCAST_WFD_CAPTURE_ENCODE_FILE for live RENDER ENGINE switches"
