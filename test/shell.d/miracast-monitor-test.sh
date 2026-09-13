@@ -676,15 +676,14 @@ assertEqual(
 )
 JS
 
-# ========== capture env: do not force damage-aware wf-recorder ==========
-# Continuous -D is the default; damage-aware capture is opt-in because it can
-# raise wakeups/battery draw on virtual Extend outputs.
-if rg -q 'export FLUXCAST_WFD_WF_RECORDER_DAMAGE=1' "$PLUGIN_BIN/miracast-ctl"; then
-  fail "miracast-ctl must not force FLUXCAST_WFD_WF_RECORDER_DAMAGE=1"
-fi
+# ========== capture env: damage-aware by default (omit wf-recorder -D) ==========
 rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE' "$PLUGIN_BIN/miracast-ctl" ||
-  fail "miracast-ctl should document opt-in FLUXCAST_WFD_WF_RECORDER_DAMAGE"
-pass "miracast-ctl leaves damage-aware capture opt-in (not forced)"
+  fail "miracast-ctl must set FLUXCAST_WFD_WF_RECORDER_DAMAGE for capture cadence"
+rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE:-1' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "damage-aware capture should default on (DAMAGE:-1)"
+rg -q 'FLUXCAST_WFD_WF_RECORDER_DAMAGE=0' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "must document FLUXCAST_WFD_WF_RECORDER_DAMAGE=0 for continuous -D"
+pass "miracast-ctl defaults to damage-aware capture"
 
 # ========== capture encode / RENDER ENGINE ==========
 rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE_FILE' "$PLUGIN_BIN/miracast-ctl" ||
