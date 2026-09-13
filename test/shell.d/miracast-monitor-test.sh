@@ -735,6 +735,16 @@ rg -q 'wfRecorderBin' "$PLUGIN_BIN/miracast-ctl" ||
 
 pass "miracast-ctl uses PATH wf-recorder by default (ICC opt-in only)"
 
+# ========== WFD audio (default on; not a PipeWire sink) ==========
+rg -q '"audioEnabled": True' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "settings defaults must enable audioEnabled"
+rg -q -- '--no-audio' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must accept --no-audio to disable WFD audio"
+# Default init must be empty (settings-driven), not hard-coded off.
+rg -q 'with_audio=""' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "with_audio should default empty and read settings.audioEnabled"
+pass "miracast-ctl defaults WFD audio on (settings.audioEnabled)"
+
 # ========== capture encode / RENDER ENGINE ==========
 rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE_FILE' "$PLUGIN_BIN/miracast-ctl" ||
   fail "miracast-ctl must export FLUXCAST_WFD_CAPTURE_ENCODE_FILE for live RENDER ENGINE switches"
