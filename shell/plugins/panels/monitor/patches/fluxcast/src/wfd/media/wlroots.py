@@ -4,7 +4,7 @@ import subprocess
 import time
 
 from ..config import WFDNotReady
-from ..wf_recorder import find_wf_recorder
+from ..wf_recorder import find_wf_recorder, wf_recorder_supports_icc
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _kbits_to_bitrate_text, _letterbox_vf,
     _parse_resolution, _quality_floor_kbits, _vbv_bufsize,
@@ -158,14 +158,28 @@ class WlrootsMixin:
         )
         return [] if damage_aware else ["-D"]
 
+    def _wf_capture_rate_args(self, wf_recorder: str) -> list[str]:
+        """Capture cadence flags for this wf-recorder build.
+
+        Stock wlr-screencopy DMA: do **not** pass ``-r`` — it appends ``fps=N``
+        after ``scale_vaapi`` and forces a VAAPI→software conversion (glitchy).
+
+        ext-image-copy-capture (PR #347): ``-r`` sets the client request rate
+        without that fps filter; without it the PR defaults to 60. Pass ``-r``
+        only when the binary advertises ICC/toplevel support.
+        """
+        if wf_recorder_supports_icc(wf_recorder):
+            return ["-r", str(self.config.fps)]
+        return []
+
     def _start_wf_recorder_vaapi_dmabuf(self, wf_recorder: str, monitor) -> None:
         """Capture+encode on GPU (DMA-BUF); ffmpeg only remuxes to RTP.
 
         Colorspace notes (Intel + Hyprland):
         - DMA-BUF frames arrive as RGB/GBR drm primes; scale_vaapi must convert
           to NV12 with **tv/limited** range (full/pc looked glitchy on sinks).
-        - Do **not** pass ``-r``: wf-recorder appends ``fps=N`` after scale_vaapi,
-          which forces a vaapi→software conversion and breaks/glitches the graph.
+        - Stock builds: do **not** pass ``-r`` (appends ``fps=`` after scale_vaapi).
+          ICC builds: pass ``-r`` via ``_wf_capture_rate_args`` for capture cadence.
         - Force ``bf=0`` + constrained_baseline for Miracast-friendly bitstreams
           (default High+bframes produced visible “repeating pixel” artifacts).
         """
@@ -189,11 +203,12 @@ class WlrootsMixin:
         else:
             vf = "scale_vaapi=format=nv12:out_range=tv"
 
+        icc = wf_recorder_supports_icc(wf_recorder)
         wf_cmd = [
             wf_recorder,
             "-y",
             *self._wf_damage_flag(),
-            # No -r here (see docstring). Framerate comes from encoder params.
+            *self._wf_capture_rate_args(wf_recorder),
             # -b 0 is max b-frames (not bitrate) — required for Miracast sinks.
             "-o", monitor.name,
             "-c", "h264_vaapi",
@@ -210,45 +225,40 @@ class WlrootsMixin:
             "-m", "nut",
             "-f", "/dev/stdout",
         ]
+        # Bake AAC into the same nut as video. A second live pulse input in
+        # ffmpeg stalls reading pipe:0 and fills wf-recorder's buffer pool.
+        if not self.config.no_audio and audio_monitor:
+            wf_cmd[1:1] = [f"--audio={audio_monitor}", "-C", "aac", "-R", "48000"]
 
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-fflags", "+genpts",
-            "-thread_queue_size", "1024",
+            "-thread_queue_size", "4096",
             "-f", "nut",
             "-i", "pipe:0",
+            "-map", "0:v:0",
+            "-c:v", "copy",
         ]
-
-        if not self.config.no_audio:
+        if not self.config.no_audio and audio_monitor:
             ffmpeg_cmd += [
-                "-thread_queue_size", "1024",
-                "-f", "pulse",
-                "-i", audio_monitor,
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-c:v", "copy",
-                "-af", "aresample=async=1",
-                "-c:a", "aac",
-                "-profile:a", "aac_low",
-                "-b:a", "128k",
-                "-ac", "2",
-                "-ar", "48000",
+                "-map", "0:a:0",
+                "-c:a", "copy",
                 "-streamid", "1:4352",
             ]
-        else:
-            ffmpeg_cmd += ["-map", "0:v:0", "-c:v", "copy"]
 
         ffmpeg_cmd += self._common_output_args()
 
         print(f"[FluxCast WFD Media] Capturing screen : {monitor.name} ({meta['src_res']})")
         if not self.config.no_audio:
-            print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor}")
+            print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor} (via wf-recorder)")
         if meta["out_res"] != meta["src_res"]:
             print(f"[FluxCast WFD Media] Scaling output  : {meta['out_res']}")
+        proto = "icc" if icc else "wlr-screencopy"
         print(
             f"[FluxCast WFD Media] Video encoder   : h264_vaapi via wf-recorder "
             f"DMA-BUF on {device} ({meta['bias']} power bias, "
-            f"CQP qp={qp}, gop={gop}, quality={quality}, tv-range, no-bframes)"
+            f"CQP qp={qp}, gop={gop}, quality={quality}, tv-range, no-bframes, "
+            f"proto={proto})"
         )
         print(
             f"[FluxCast WFD Media] RTP target      : "
@@ -304,14 +314,14 @@ class WlrootsMixin:
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             *plan.pre_input,
             "-fflags", "+genpts",
-            "-thread_queue_size", "1024",
+            "-thread_queue_size", "4096",
             "-f", "nut",
             "-i", "pipe:0",
         ]
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
-                "-thread_queue_size", "1024",
+                "-thread_queue_size", "4096",
                 "-f", "pulse",
                 "-i", audio_monitor,
                 "-map", "0:v:0",

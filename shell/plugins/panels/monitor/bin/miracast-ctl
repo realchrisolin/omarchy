@@ -8,6 +8,7 @@ LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-miracast/logs"
 PID_FILE="$STATE_DIR/cast.pid"
 # PipeWire/Pulse null-sink module id while casting (selectable Miracast output).
 AUDIO_SINK_MODULE_FILE="$STATE_DIR/audio-sink.module"
+AUDIO_SILENCE_PID_FILE="$STATE_DIR/audio-silence.pid"
 MIRACAST_AUDIO_SINK_NAME="miracast"
 MIRACAST_AUDIO_SINK_DESC="Miracast"
 STATUS_FILE="$STATE_DIR/status.json"
@@ -162,14 +163,12 @@ defaults = {
     # Default Hyprland scale for Miracast Extend when sinkScales has no MAC entry.
     # 1 minimizes compositor cost; raise per-sink via the Display panel if needed.
     "defaultExtendScale": 1,
-    # Virtual output refresh (Hz). 60 = smooth local cursor; 30 = less Hyprland
-    # work but pointer on the Extend monitor feels laggy.
-    "extendRefresh": 60,
-    # Force Hyprland software cursors so the pointer is visible in capture/TV.
-    # Default false: local Extend pointer stays snappy (HW cursors). On Intel
-    # iGPU, prefer Extend on the RIGHT — left-of-primary hits an i915 cursor
-    # plane bug ("cursor not allowed to straddle the left screen edge").
-    "softwareCursors": False,
+    # Virtual output refresh (Hz). Default 30 to match stream fps — keeps ICC
+    # capture from outrunning the encoder (large buffer queues = lag).
+    "extendRefresh": 30,
+    # Force software cursors so the pointer is visible on the TV (screencopy
+    # cannot see the HW cursor plane).
+    "softwareCursors": True,
     # Optional absolute path to a custom wf-recorder (e.g. ICC / PR #347).
     # Empty = use PATH wf-recorder (stock / portable default). No path probing.
     "wfRecorderBin": "",
@@ -509,24 +508,23 @@ if vs <= 0:
     vs = 1.0
 hlw = int(round(hw / vs))
 hlh = int(round(hh / vs))
-# Headless refresh controls *local* pointer/compositor feel on the Extend
-# output. Keep it at 60Hz by default — a 30Hz virtual monitor makes the
-# software cursor (required for capture) feel severely laggy. Capture still
-# runs at the Miracast stream rate (-r / fps), so RTP cost stays tied to
-# streamMode, not this refresh. Override with settings.extendRefresh (30|60).
-refresh = 60
+# Match Extend refresh to the Miracast stream rate by default (usually 30).
+# A 60Hz headless while capturing at 30fps overproduces damage/ICC frames,
+# the buffer pool balloons, and the desktop feels laggy. Override with
+# settings.extendRefresh if needed.
+refresh = 30
 try:
     settings = json.load(open(settings_path)) if settings_path else {}
 except Exception:
     settings = {}
 try:
-    want = int(float(settings.get("extendRefresh") or 60))
+    want = int(float(settings.get("extendRefresh") or 30))
 except Exception:
-    want = 60
-if want <= 30:
-    refresh = 30
-else:
+    want = 30
+if want >= 60:
     refresh = 60
+else:
+    refresh = 30
 
 if pos == "left":
     x, y = -hlw, max(0, (plh - hlh) // 2)
@@ -2181,6 +2179,18 @@ ensure_miracast_audio_sink() {
   for i in 1 2 3 4 5 6 7 8 9 10; do
     if pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$MIRACAST_AUDIO_SINK_NAME"; then
       echo "[miracast-ctl] audio sink $MIRACAST_AUDIO_SINK_NAME (module $mid)" >>"$LOG_DIR/cast.log"
+      # Keep a silent stream into the sink so ffmpeg's pulse capture of
+      # miracast.monitor never blocks waiting for the first sample (that
+      # stalls the video pipe and fills wf-recorder's buffer pool).
+      if [[ ! -f "$AUDIO_SILENCE_PID_FILE" ]] || ! kill -0 "$(tr -d '[:space:]' <"$AUDIO_SILENCE_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        # Output silence into the Miracast sink (argv marker for pkill on teardown).
+        nohup ffmpeg -hide_banner -loglevel error \
+          -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+          -f pulse "$MIRACAST_AUDIO_SINK_NAME" \
+          >/dev/null 2>&1 &
+        echo $! >"$AUDIO_SILENCE_PID_FILE"
+        echo "[miracast-ctl] started silence feeder pid=$!" >>"$LOG_DIR/cast.log"
+      fi
       echo "$MIRACAST_AUDIO_SINK_NAME"
       return 0
     fi
@@ -2191,6 +2201,14 @@ ensure_miracast_audio_sink() {
 }
 
 teardown_miracast_audio_sink() {
+  if [[ -f "$AUDIO_SILENCE_PID_FILE" ]]; then
+    local spid
+    spid="$(tr -d '[:space:]' <"$AUDIO_SILENCE_PID_FILE" 2>/dev/null || true)"
+    rm -f "$AUDIO_SILENCE_PID_FILE"
+    if [[ -n "$spid" ]]; then
+      kill "$spid" 2>/dev/null || true
+    fi
+  fi
   local mid=""
   if [[ -f "$AUDIO_SINK_MODULE_FILE" ]]; then
     mid="$(tr -d '[:space:]' <"$AUDIO_SINK_MODULE_FILE" 2>/dev/null || true)"
@@ -2381,7 +2399,17 @@ if m:
       return 1
     fi
     monitor="$headless"
-    enable_software_cursors
+    local want_sw
+    want_sw="$(python3 -c 'import json,sys
+s=json.loads(sys.argv[1])
+v=s.get("softwareCursors", True)
+print("1" if v in (True,1,"1","true","yes","on") else "0")' "$settings")"
+    if [[ "$want_sw" == "1" ]]; then
+      enable_software_cursors
+    else
+      restore_software_cursors || true
+      timeout 2 hyprctl eval 'hl.config({ cursor = { no_hardware_cursors = false } })' >/dev/null 2>&1 || true
+    fi
   fi
 
   if [[ "$auto_fw" == "1" ]]; then
@@ -2410,14 +2438,20 @@ print("1" if v in (True,1,"1","true","yes","on") else "0")' "$settings")"
   fi
   local audio_args=(--wfd-no-audio)
   if [[ "$with_audio" == "1" ]]; then
-    local sink_name=""
-    if sink_name="$(ensure_miracast_audio_sink)"; then
-      # Capture the Miracast null-sink monitor so the sound panel can choose
-      # that device as default (we do not auto-switch the default).
-      audio_args=(--wfd-audio-device "${sink_name}.monitor")
+    # Debug/escape hatch: capture default sink monitor instead of Miracast null sink.
+    if [[ "${MIRACAST_USE_DEFAULT_AUDIO_MONITOR:-}" =~ ^(1|true|yes)$ ]]; then
+      teardown_miracast_audio_sink || true
+      audio_args=(--wfd-audio-device "$(pactl get-default-sink).monitor")
     else
-      echo "[miracast-ctl] audio sink missing; falling back to default-sink monitor" >>"$LOG_DIR/cast.log"
-      audio_args=()
+      local sink_name=""
+      if sink_name="$(ensure_miracast_audio_sink)"; then
+        # Capture the Miracast null-sink monitor so the sound panel can choose
+        # that device as default (we do not auto-switch the default).
+        audio_args=(--wfd-audio-device "${sink_name}.monitor")
+      else
+        echo "[miracast-ctl] audio sink missing; falling back to default-sink monitor" >>"$LOG_DIR/cast.log"
+        audio_args=()
+      fi
     fi
   else
     teardown_miracast_audio_sink || true
