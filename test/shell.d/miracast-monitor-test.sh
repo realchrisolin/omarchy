@@ -744,6 +744,13 @@ rg -q -- '--no-audio' "$PLUGIN_BIN/miracast-ctl" ||
 rg -q 'with_audio=""' "$PLUGIN_BIN/miracast-ctl" ||
   fail "with_audio should default empty and read settings.audioEnabled"
 pass "miracast-ctl defaults WFD audio on (settings.audioEnabled)"
+rg -q 'ensure_miracast_audio_sink' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must create a selectable Miracast null sink"
+rg -q 'teardown_miracast_audio_sink' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must tear down Miracast audio sink on stop"
+rg -q 'wfd-audio-device' "$PLUGIN_BIN/miracast-ctl" ||
+  fail "miracast-ctl must pass --wfd-audio-device to FluxCast"
+pass "miracast-ctl exposes selectable Miracast audio sink"
 
 # ========== capture encode / RENDER ENGINE ==========
 rg -q 'FLUXCAST_WFD_CAPTURE_ENCODE_FILE' "$PLUGIN_BIN/miracast-ctl" ||
