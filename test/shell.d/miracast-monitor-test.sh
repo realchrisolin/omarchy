@@ -695,6 +695,44 @@ if awk '/^resolve_wf_recorder_env\(\)/,/^}/' "$PLUGIN_BIN/miracast-ctl" |
 fi
 rg -q 'wfRecorderBin' "$PLUGIN_BIN/miracast-ctl" ||
   fail "settings must document wfRecorderBin for explicit ICC opt-in"
+
+# Behavioral: empty settings / no env → empty BIN (FluxCast uses PATH).
+(
+  tmpdir=$(mktemp -d)
+  trap 'rm -rf "$tmpdir"' EXIT
+  printf '%s\n' '{}' >"$tmpdir/settings.json"
+  SETTINGS_FILE="$tmpdir/settings.json"
+  # shellcheck disable=SC1090
+  eval "$(sed -n '/^resolve_wf_recorder_env()/,/^}/p' "$PLUGIN_BIN/miracast-ctl")"
+  unset FLUXCAST_WFD_WF_RECORDER_BIN FLUXCAST_WFD_WF_RECORDER_PROTO
+  eval "$(resolve_wf_recorder_env 2>/dev/null)"
+  [ -z "${WF_RECORDER_BIN:-}" ] || {
+    echo "expected empty WF_RECORDER_BIN, got: $WF_RECORDER_BIN" >&2
+    exit 1
+  }
+) || fail "resolve_wf_recorder_env must leave BIN empty when unset (PATH default)"
+
+# Behavioral: PROTO=icc without a usable BIN → fail-soft (empty BIN, warn).
+(
+  tmpdir=$(mktemp -d)
+  trap 'rm -rf "$tmpdir"' EXIT
+  printf '%s\n' '{"wfRecorderProto":"icc"}' >"$tmpdir/settings.json"
+  SETTINGS_FILE="$tmpdir/settings.json"
+  eval "$(sed -n '/^resolve_wf_recorder_env()/,/^}/p' "$PLUGIN_BIN/miracast-ctl")"
+  unset FLUXCAST_WFD_WF_RECORDER_BIN FLUXCAST_WFD_WF_RECORDER_PROTO
+  errfile="$tmpdir/err.txt"
+  out=$(resolve_wf_recorder_env 2>"$errfile")
+  eval "$out"
+  [ -z "${WF_RECORDER_BIN:-}" ] || {
+    echo "icc-without-bin should clear BIN, got: $WF_RECORDER_BIN" >&2
+    exit 1
+  }
+  rg -q 'falling back to PATH' "$errfile" || {
+    echo "expected PATH fallback warning, got: $(cat "$errfile")" >&2
+    exit 1
+  }
+) || fail "resolve_wf_recorder_env must fail-soft when PROTO=icc without BIN"
+
 pass "miracast-ctl uses PATH wf-recorder by default (ICC opt-in only)"
 
 # ========== capture encode / RENDER ENGINE ==========
