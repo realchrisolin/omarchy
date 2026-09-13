@@ -725,11 +725,15 @@ rg -q 'setCaptureEncode' "$PLUGIN/MiracastService.qml" ||
   fail "MiracastService must expose setCaptureEncode"
 rg -q 'miracastCaptureEncodeActive' "$PLUGIN/Model.js" ||
   fail "Model.js must map resolved capture path to active pill"
-# Gate: RENDER ENGINE column must require showMiracastSessionControls (not pre-connect).
-rg -n -B6 'text: "RENDER ENGINE"' "$PLUGIN/Panel.qml" | rg -q 'showMiracastSessionControls' ||
-  fail "RENDER ENGINE must be gated on showMiracastSessionControls (connected only)"
+# Gate: RENDER ENGINE is on the cast-controls column (Extend headless / Mirror eDP),
+# which itself requires showMiracastSessionControls (connected only — not pre-connect).
+rg -n -B6 'text: "RENDER ENGINE"' "$PLUGIN/Panel.qml" | rg -q 'showMiracastCastControls' ||
+  fail "RENDER ENGINE must be gated on showMiracastCastControls"
+rg -n -A3 'readonly property bool showMiracastCastControls' "$PLUGIN/Panel.qml" |
+  rg -q 'showMiracastSessionControls' ||
+  fail "showMiracastCastControls must require showMiracastSessionControls (connected only)"
 if command -v node >/dev/null 2>&1; then
-  node <<'JS' || fail "Model.js miracastCaptureEncodeActive mapping"
+  PLUGIN="$PLUGIN" node <<'JS' || fail "Model.js miracastCaptureEncodeActive mapping"
 const M = require(process.env.PLUGIN + "/Model.js");
 const assert = (c, m) => { if (!c) { console.error(m); process.exit(1); } };
 assert(M.miracastCaptureEncodeActive("dmabuf", "h264_vaapi", "cpu") === "dmabuf", "dmabuf");
