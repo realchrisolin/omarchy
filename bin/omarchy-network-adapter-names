@@ -1,0 +1,73 @@
+#!/bin/bash
+
+# omarchy:summary=Print a hardware label for each Wi-Fi device
+# omarchy:group=network
+# omarchy:hidden=true
+
+# Print one tab-separated line per Wi-Fi device: interface, then a short
+# hardware label. The label prefers a specific product name and falls back
+# to the vendor. A generic product string is not a label.
+
+set -euo pipefail
+
+omarchy-cmd-present nmcli || exit 0
+
+clean_words() {
+  local s=$1
+  s=${s//_/ }
+  s=$(printf '%s' "$s" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  printf '%s' "$s"
+}
+
+strip_suffix() {
+  local s=$1 prev
+  while true; do
+    prev=$s
+    s=$(printf '%s' "$s" | sed -E 's/[,.]? (Inc\.?|Incorporated|Corporation|Corp\.?|Ltd\.?|Limited|GmbH|LLC|Co\.?|S\.?A\.?)$//I')
+    [[ $s == "$prev" ]] && break
+  done
+  printf '%s' "$s"
+}
+
+is_generic() {
+  local s
+  s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case $s in
+    "" | wireless | wireless\ device | wireless\ adapter | wlan | wifi | wi-fi | wi-fi\ device | network\ controller | ethernet\ controller | 802.11*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+contains_ci() {
+  local hay=$1 needle=$2
+  local folded_hay folded_needle
+  [[ -n $needle ]] || return 1
+  folded_hay=$(printf '%s' "$hay" | tr '[:upper:]' '[:lower:]')
+  folded_needle=$(printf '%s' "$needle" | tr '[:upper:]' '[:lower:]')
+  [[ $folded_hay == *"$folded_needle"* ]]
+}
+
+while IFS=: read -r dev type _; do
+  [[ $type == wifi ]] || continue
+  [[ $dev =~ ^[A-Za-z0-9._-]+$ ]] || continue
+
+  vendor=$(nmcli -g GENERAL.VENDOR device show "$dev" 2>/dev/null || true)
+  product=$(nmcli -g GENERAL.PRODUCT device show "$dev" 2>/dev/null || true)
+  vendor=$(strip_suffix "$(clean_words "$vendor")")
+  product=$(clean_words "$product")
+
+  label=""
+  if [[ -n $product ]] && ! is_generic "$product"; then
+    if [[ -n $vendor ]] && ! is_generic "$vendor" && ! contains_ci "$product" "$vendor"; then
+      label="$vendor $product"
+    else
+      label=$product
+    fi
+  elif [[ -n $vendor ]] && ! is_generic "$vendor"; then
+    label=$vendor
+  fi
+
+  printf '%s\t%s\n' "$dev" "$label"
+done < <(nmcli -t -f DEVICE,TYPE device status 2>/dev/null || true)

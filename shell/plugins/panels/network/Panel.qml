@@ -96,6 +96,10 @@ Panel {
   property var disabledAdapters: []
   property string pendingAdapterIface: ""
   property int adapterIndex: 0
+  // iface -> hardware label. Empty until the name helper returns. The pill
+  // falls back to the interface name alone when a device has no label.
+  property var adapterLabels: ({})
+  property bool adapterNamePending: false
   property var wifiNetworks: []
   property bool scanning: false
   property bool wifiStationAvailable: false
@@ -221,6 +225,7 @@ Panel {
       focusSection = wifiNetworks.length > 0 ? "wifi" : "dns"
     }
     root.refresh()
+    root.refreshAdapterNames()
   }
 
   onSelectedWifiDeviceChanged: {
@@ -583,6 +588,40 @@ Panel {
     if (verbose) command.push("--verbose")
     if (selectedIface !== "") command = command.concat(["--iface", selectedIface])
     return command
+  }
+
+  function adapterLabel(iface) {
+    var labels = adapterLabels || {}
+    var label = labels[iface]
+    return label ? String(label) : ""
+  }
+
+  function refreshAdapterNames() {
+    if (adapterNameProc.running) {
+      adapterNamePending = true
+      return
+    }
+    adapterNameProc.command = ["omarchy-network-adapter-names"]
+    adapterNameProc.running = true
+  }
+
+  function updateAdapterNames(raw) {
+    var next = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (!line) continue
+      var tab = line.indexOf("\t")
+      if (tab <= 0) continue
+      var iface = line.slice(0, tab)
+      var label = line.slice(tab + 1).replace(/^\s+|\s+$/g, "")
+      if (iface && label) next[iface] = label
+    }
+    adapterLabels = next
+    if (adapterNamePending) {
+      adapterNamePending = false
+      refreshAdapterNames()
+    }
   }
 
   function bandCommand(band) {
@@ -1025,7 +1064,10 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    refresh()
+    refreshAdapterNames()
+  }
 
   // Pulls everything we want about the selected adapter in one shot. The
   // command is rebuilt at each launch so it follows the adapter selection.
@@ -1070,6 +1112,14 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateBand(text)
+    }
+  }
+
+  Process {
+    id: adapterNameProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.updateAdapterNames(text)
     }
   }
 
@@ -1790,8 +1840,8 @@ Panel {
 
 
       // Wi-Fi adapter selection. Only shown when there are multiple Wi-Fi
-      // adapters (e.g. onboard + USB dongle). Each pill shows the interface
-      // name and connection state, with an on/off toggle.
+      // adapters (e.g. onboard + USB dongle). Each pill shows a hardware
+      // label and the interface name, with an on/off toggle.
       PanelSeparator {
         visible: root.showAdapterSelector
         foreground: root.bar.foreground
@@ -1967,7 +2017,7 @@ Panel {
     }
   }
 
-  // A single Wi-Fi adapter pill. Shows the interface name, connection state,
+  // A single Wi-Fi adapter pill. Shows a hardware label, the interface name,
   // and an on/off toggle. Clicking selects the adapter; the toggle enables
   // or disables it.
   component AdapterPill: Button {
@@ -1993,29 +2043,32 @@ Panel {
       return isConnected
     }
 
-    text: iface
+    // Button centres a single-line label and ignores extra right padding, so a
+    // second line plus the switch would paint on top of each other. The label
+    // column is its own text, ending at the switch.
+    text: ""
     fontSize: Style.font.bodySmall
     foreground: root.bar.foreground
     fontFamily: root.bar.fontFamily
-    // Button centres its label and reserves no room for child items, so the
-    // trailing padding has to cover the switch explicitly or a longer
-    // interface name runs straight under it.
     horizontalPadding: Style.spacing.controlPaddingX
-    rightPadding: Style.spacing.controlPaddingX + adapterToggle.implicitWidth + Style.spacing.controlGap
     verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
     bordered: true
+    leftAlign: true
 
-    // Natural width, floored so a long name elides instead of squeezing the
-    // switch, and capped so one adapter cannot span the whole panel.
+    readonly property string hardwareLabel: root.adapterLabel(iface)
+    readonly property string titleText: hardwareLabel !== "" ? hardwareLabel : iface
+    readonly property string ifaceLine: hardwareLabel !== "" ? "(" + iface + ")" : ""
+    readonly property color labelColor: (isSelected || active) ? _selectedColor : foreground
     readonly property real minPillWidth: Style.space(120)
-    width: Math.max(minPillWidth, Math.min(implicitWidth, adapterRow.width))
+    readonly property real labelNaturalWidth: Math.max(nameText.implicitWidth, ifaceText.visible ? ifaceText.implicitWidth : 0)
+    readonly property real switchReserve: adapterToggle.implicitWidth + Style.spacing.controlGap
+    width: Math.max(minPillWidth, Math.min(labelNaturalWidth + horizontalPadding + switchReserve + horizontalPadding, Math.max(minPillWidth, adapterRow.width)))
+    implicitHeight: Math.max(labelColumn.implicitHeight, adapterToggle.implicitHeight) + verticalPadding * 2 + Style.space(2)
 
     active: isSelected
     selected: isSelected
     hasCursor: root.cursorActive && root.focusSection === "adapter" && root.adapterIndex === slot
-    tooltipText: isConnected
-      ? "Showing " + iface + " (connected)"
-      : (isEnabled ? "Showing " + iface + " (connecting)" : "Showing " + iface + " (off)")
+    tooltipText: (hardwareLabel !== "" ? hardwareLabel + " " : "") + iface + (isConnected ? " (connected)" : (isEnabled ? " (connecting)" : " (off)"))
 
     onClicked: {
       root.selectedWifiIface = iface
@@ -2028,13 +2081,49 @@ Panel {
       root.adapterIndex = pill.slot
     }
 
-    // On/off toggle switch on the right side of the pill
+    Column {
+      id: labelColumn
+      anchors.left: parent.left
+      anchors.leftMargin: pill.horizontalPadding
+      anchors.right: adapterToggle.left
+      anchors.rightMargin: Style.spacing.controlGap
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: 0
+
+      Text {
+        id: nameText
+        width: labelColumn.width
+        text: pill.titleText
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        color: pill.labelColor
+        font.family: pill.fontFamily
+        font.pixelSize: pill.fontSize
+        font.bold: pill.isSelected
+      }
+
+      Text {
+        id: ifaceText
+        width: labelColumn.width
+        visible: pill.ifaceLine !== ""
+        text: pill.ifaceLine
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        color: pill.labelColor
+        opacity: 0.72
+        font.family: pill.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    // On/off toggle. It sits past the text, in its own column of the pill.
     ToggleSwitch {
       id: adapterToggle
+      z: 1
       trackHeight: Math.round(pill.fontSize * 1.2)
       cursorPad: Style.space(3)
       anchors.right: parent.right
-      anchors.rightMargin: Style.spacing.controlGap
+      anchors.rightMargin: pill.horizontalPadding
       anchors.verticalCenter: parent.verticalCenter
       checked: isEnabled
       busy: root.pendingAdapterIface === iface
