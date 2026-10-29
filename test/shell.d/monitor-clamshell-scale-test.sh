@@ -23,7 +23,15 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
   other=""
   [[ -n ${OMARCHY_TEST_OTHER_OUTPUT:-} ]] && other=$(printf ',{"name":"%s","disabled":false,"scale":1}' "$OMARCHY_TEST_OTHER_OUTPUT")
   if [[ ${OMARCHY_TEST_INTERNAL_DISABLED:-false} == "true" ]]; then
-    printf '[{"name":"eDP-1","disabled":true,"scale":null}%s]' "$other"
+    if [[ ${OMARCHY_TEST_INTERNAL_DPMS:-false} == "true" || ${OMARCHY_TEST_INTERNAL_FOCUSED:-false} == "true" ]]; then
+      printf '[{"name":"eDP-1","disabled":true,"dpmsStatus":%s,"focused":%s,"scale":%s}%s]' \
+        "${OMARCHY_TEST_INTERNAL_DPMS:-false}" \
+        "${OMARCHY_TEST_INTERNAL_FOCUSED:-false}" \
+        "${OMARCHY_TEST_INTERNAL_SCALE:-null}" \
+        "$other"
+    else
+      printf '[{"name":"eDP-1","disabled":true,"scale":null}%s]' "$other"
+    fi
   else
     printf '[{"name":"eDP-1","disabled":false,"scale":%s}%s]' "${OMARCHY_TEST_INTERNAL_SCALE:-2}" "$other"
   fi
@@ -85,6 +93,8 @@ run_clamshell() {
     OMARCHY_TEST_CLAMSHELL="${OMARCHY_TEST_CLAMSHELL:-false}" \
     OMARCHY_TEST_EXTERNAL_CONNECTED="${OMARCHY_TEST_EXTERNAL_CONNECTED:-false}" \
     OMARCHY_TEST_OTHER_OUTPUT="${OMARCHY_TEST_OTHER_OUTPUT:-}" \
+    OMARCHY_TEST_INTERNAL_DPMS="${OMARCHY_TEST_INTERNAL_DPMS:-false}" \
+    OMARCHY_TEST_INTERNAL_FOCUSED="${OMARCHY_TEST_INTERNAL_FOCUSED:-false}" \
     "$ROOT/bin/omarchy-hyprland-monitor-clamshell"
 }
 
@@ -156,7 +166,20 @@ expect_sync "clamshell recovery leaves an explicitly auto panel alone" 3 1.75 '!
 # A numeric config keeps both sync behaviors: a matching active scale is not
 # reapplied, and a drifted one is corrected back to the configured value.
 expect_sync "clamshell recovery avoids redundant scale apply" 1.25 - '!scale = ' <<<"$internal_config"
-expect_sync "clamshell recovery corrects a drifted numeric scale" 3 - 'scale = 1.25' <<<"$internal_config"
+expect_sync "clamshell recovery corrects a drifted numeric scale" 3 - 'scale = 1.25' '!position =' '!mode =' <<<"$internal_config"
+
+# A focused or DPMS-on panel can be reported disabled. Its live scale still
+# counts, so a match writes no rule.
+printf '%s\n' "$internal_config" >"$monitor_lua"
+: >"$eval_log"
+OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_DPMS=true OMARCHY_TEST_INTERNAL_SCALE=1.25 run_clamshell
+! grep -F 'scale = ' "$eval_log" >/dev/null || fail "clamshell recovery leaves a DPMS-on disabled panel at its configured scale" "$(<"$eval_log")"
+pass "clamshell recovery leaves a DPMS-on disabled panel alone when the scale matches"
+
+: >"$eval_log"
+OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_FOCUSED=true OMARCHY_TEST_INTERNAL_SCALE=1.25 run_clamshell
+! grep -F 'scale = ' "$eval_log" >/dev/null || fail "clamshell recovery leaves a focused disabled panel at its configured scale" "$(<"$eval_log")"
+pass "clamshell recovery leaves a focused disabled panel alone when the scale matches"
 
 printf '%s\n' "$auto_config" >"$monitor_lua"
 rm -f "$scale_state"
@@ -176,7 +199,7 @@ pass "clamshell recovery uses remembered internal scale"
 # remembered, still needs a number: the historical default 2.
 expect_sync "clamshell recovery falls back to the default scale" off - 'scale = 2' <<<"$auto_config"
 
-expect_sync "clamshell recovery uses configured internal monitor rule" off - 'position = "0x0"' 'scale = 1.25' <<<"$internal_config"
+expect_sync "clamshell recovery applies the configured scale without moving the panel" off - 'disabled = false, scale = 1.25' '!position =' '!mode =' <<<"$internal_config"
 
 # A rule referencing a local resolves to the local's value, not the literal name.
 expect_sync "clamshell recovery resolves omarchy_monitor_scale variable reference" off - 'scale = 1.5' <<'LUA'
@@ -212,11 +235,6 @@ local omarchy_monitor_scale = 1.25 -- HiDPI panel
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
 LUA
 
-expect_sync "clamshell recovery resolves a position variable reference" off - 'position = "0x0"' <<'LUA'
-local omarchy_monitor_position = "0x0"
-hl.monitor({ output = "eDP-1", mode = "preferred", position = omarchy_monitor_position, scale = 1.25 })
-LUA
-
 # An internal rule that names no scale leaves the catch-all to supply one. Only
 # a rule that names a scale keeps the catch-all away from the internal panel.
 expect_sync "clamshell recovery takes the catch-all scale when the internal rule omits one" off 1.75 'scale = 1' '!scale = 1.75' <<'LUA'
@@ -247,7 +265,7 @@ for rule in \
   'hl.monitor({ output = "eDP-1", reserved_area = { top = 24 }, position = "0x0", scale = 1.25 })' \
   'hl.monitor({ output = "eDP-1", --[[ internal panel ]] position = "0x0", scale = 1.25 })' \
   'hl.monitor({ output = "eDP-1"; position = "0x0"; scale = 1.25; transform = 1 })'; do
-  expect_sync "clamshell recovery reads the position and scale out of: $rule" off 1.75 'position = "0x0"' 'scale = 1.25' <<<"$rule"
+  expect_sync "clamshell recovery reads the scale out of: $rule" off 1.75 'scale = 1.25' '!position =' '!mode =' <<<"$rule"
 done
 
 # A panel turned off from the Display panel is a runtime disabled = true with
@@ -258,10 +276,10 @@ done
 # this every two seconds.
 OMARCHY_TEST_OTHER_OUTPUT=FALLBACK \
   expect_sync "clamshell recovery turns a panel-disabled display back on once nothing external is connected" off - \
-  'hl.monitor({ output = "eDP-1", disabled = false, mode = "preferred", position = "0x0", scale = 1.25 })' <<<"$internal_config"
+  'hl.monitor({ output = "eDP-1", disabled = false, scale = 1.25 })' <<<"$internal_config"
 OMARCHY_TEST_EXTERNAL_CONNECTED=true OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_OTHER_OUTPUT=DP-1 \
   expect_sync "clamshell recovery leaves a panel-disabled display off while an external display is connected" off - \
-  'scale = 1.25' '!disabled = false' <<<"$internal_config"
+  'scale = 1.25' '!disabled = false' '!position =' '!mode =' <<<"$internal_config"
 OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_OTHER_OUTPUT=HEADLESS-1 \
   expect_sync "clamshell recovery leaves a panel-disabled display off while a headless output is enabled" off - \
-  'scale = 1.25' '!disabled = false' <<<"$internal_config"
+  'scale = 1.25' '!disabled = false' '!position =' '!mode =' <<<"$internal_config"

@@ -107,9 +107,16 @@ configured_monitor_scale() {
   printf '%s\n' "$scale"
 }
 
+# A focused or DPMS-on panel can still be reported disabled. It has a live
+# scale. A panel that is off altogether does not, and the caller falls back
+# to the remembered scale.
 current_internal_scale() {
   [[ -n $INTERNAL ]] || return 0
-  hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true) | .scale' | head -1
+  hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '
+    .[] | select(.name == $internal)
+    | select((.disabled != true) or (.dpmsStatus == true) or (.focused == true))
+    | .scale
+  ' | head -1
 }
 
 # Hyprland's FALLBACK stands in once nothing is left, so it is not somewhere to
@@ -159,32 +166,21 @@ read_monitor_scale() {
   echo 2
 }
 
-read_monitor_position() {
-  local position
-  position=$(configured_internal_monitor_value position)
-  if [[ $position =~ ^[-[:alnum:]_.+]+$ ]]; then
-    echo "$position"
-    return
-  fi
-
-  echo auto
-}
-
+# Scale only. hl.monitor copies the current rule and overwrites named keys,
+# so a position or a mode here would move a panel that is already placed.
+# A runtime rule can carry disabled = true with no flag, and a scale update
+# leaves that in force. Say disabled = false only while no external display
+# is physically connected and no other output is enabled: that is the unplug
+# this recovers from (#16307). Otherwise the choice to run elsewhere stands,
+# and this is reached every two seconds by the docked poll.
 enable_internal_output() {
   [[ -n $INTERNAL ]] || return 0
   local scale="${1:-}"
-  local position
   local enable=""
   [[ -n $scale ]] || scale=$(read_monitor_scale)
-  position=$(read_monitor_position)
-  # A panel turned off from the Display panel is a runtime rule carrying
-  # disabled = true and no flag, and an update of its mode, position and scale
-  # leaves that in force. Say disabled = false only while no external display
-  # is physically connected and no other output is enabled: that is the unplug
-  # this recovers from (#16307). Otherwise the choice to run elsewhere stands,
-  # and this is reached every two seconds by the docked poll.
+  valid_scale "$scale" || return 0
   omarchy-hw-external-monitors || other_output_enabled || enable="disabled = false, "
-  hyprctl eval "hl.monitor({ output = \"$INTERNAL\", ${enable}mode = \"preferred\", position = \"$position\", scale = $scale })" >/dev/null 2>&1 || true
+  hyprctl eval "hl.monitor({ output = \"$INTERNAL\", ${enable}scale = $scale })" >/dev/null 2>&1 || true
 }
 
 sync_internal_scale() {
